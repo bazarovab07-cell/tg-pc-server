@@ -15,22 +15,20 @@ active_hosts = {}
 user_sessions = {}     
 
 def add_command(host_id: str, action: str, data: str = ""):
-    # Принудительно очищаем ID от невидимых символов и пробелов, переводим в нижний регистр
     host_id = str(host_id).strip().lower()
-    
     if host_id not in active_hosts:
         active_hosts[host_id] = {
             "owner_id": None, "status": "offline", "commands": [], "current_dir": "root", "items": []
         }
-    
     if "commands" not in active_hosts[host_id]:
         active_hosts[host_id]["commands"] = []
         
     active_hosts[host_id]["commands"].append({"action": action, "data": data})
-    print(f"[SERVER] Добавлена команда {action} ({data}) для чистого хоста: '{host_id}'")
+    print(f"[SERVER] Добавлена команда {action} ({data}) для хоста: '{host_id}'")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Гарантированно дропаем вебхуки и старые пуллинги перед стартом
     await bot.delete_webhook(drop_pending_updates=True)
     polling_task = asyncio.create_task(dp.start_polling(bot))
     print("[SERVER] Облачный сервер запущен.")
@@ -57,7 +55,6 @@ async def poll(request: Request):
     if not host_id or not user_id:
         return {"commands": []}
         
-    # Форматируем host_id точно так же, как в кнопках бота (строка, без пробелов, нижний регистр)
     host_id = str(host_id).strip().lower()
     uid = int(user_id)
         
@@ -71,7 +68,6 @@ async def poll(request: Request):
     user_sessions[uid] = {"current_host": host_id}
     status_data = payload.get("status", "online")
     
-    # Обработка буфера обмена С КОМПЬЮТЕРА НА ТЕЛЕФОН
     if status_data.startswith("CLIPBOARD_FROM_PC:"):
         raw_text = status_data.split("CLIPBOARD_FROM_PC:")[1]
         await bot.send_message(chat_id=uid, text=f"📋 **Скопировано на ПК:**\n`{raw_text}`", parse_mode="Markdown")
@@ -82,7 +78,6 @@ async def poll(request: Request):
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "root")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
-    # Отдаем команды агенту и сразу очищаем массив
     cmds = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     return {"commands": cmds}
@@ -168,7 +163,7 @@ async def status_pc(callback: types.CallbackQuery):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="📸 Сделать снимок экрана", callback_data="start_stream")
-    builder.button(text="⬅️ ...меню", callback_data="main_menu")
+    builder.button(text="⬅️ Меню", callback_data="main_menu")
     builder.adjust(1)
     
     status = active_hosts.get(hid, {}).get("status", "offline")
@@ -244,7 +239,6 @@ async def power_cmd(callback: types.CallbackQuery):
     add_command(hid, "power", action)
     await callback.answer("Сигнал питания отправлен.")
 
-# --- СИНХРОНИЗАЦИЯ БУФЕРА ОБМЕНА ИЗ ТЕЛЕФОНА НА ПК ---
 @dp.message(F.text & ~F.text.startswith("/") & ~F.text.startswith("kill:") & ~F.text.startswith("del:"))
 async def handle_text_for_clipboard(message: types.Message):
     uid = message.chat.id
