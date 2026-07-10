@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # --- НАСТРОЙКИ ---
 # Вставь сюда СВОЙ НОВЫЙ ТОКЕН, полученный от @BotFather
-TOKEN = "8889355917:AAFYsn7EZdO9ljP4vNbJR09m4Tbom_oG1_A"
+TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
 
 app = FastAPI()
 bot = Bot(token=TOKEN)
