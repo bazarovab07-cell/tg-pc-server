@@ -1,7 +1,7 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -11,9 +11,8 @@ TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- СТРУКТУРА ДАННЫХ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ И ПК ---
-active_hosts = {}      # { "host_id": {"owner_id": 123, "status": "online", "commands": [], "current_dir": "...", "items": []} }
-user_sessions = {}     # { user_id: {"current_host": "host_id"} }
+active_hosts = {}      
+user_sessions = {}     
 
 def add_command(host_id: str, action: str, data: str = ""):
     if host_id in active_hosts:
@@ -23,7 +22,7 @@ def add_command(host_id: str, action: str, data: str = ""):
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
     polling_task = asyncio.create_task(dp.start_polling(bot))
-    print("[SERVER] Облачный сервер запущен и готов к работе с установщиками агентов.")
+    print("[SERVER] Облачный сервер запущен.")
     yield
     polling_task.cancel()
     await bot.session.close()
@@ -32,49 +31,45 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "working", "mode": "installer_compatible_multihost"}
+    return {"status": "working", "mode": "no_multipart_compat"}
 
-# --- API ДЛЯ СКОМПИЛИРОВАННОГО АГЕНТА ---
 @app.post("/poll")
 async def poll(request: Request):
     payload = await request.json()
-    host_id = payload.get("host_id")    # Идентификатор ПК, передаваемый установщиком
-    user_id = payload.get("user_id")    # ID пользователя Telegram, указанный в приложении
+    host_id = payload.get("host_id")    
+    user_id = payload.get("user_id")    
     
     if not host_id or not user_id:
         return {"commands": []}
         
-    # Динамически регистрируем ПК в облаке, привязывая к введённому в установщике user_id
     if host_id not in active_hosts:
         active_hosts[host_id] = {
-            "owner_id": int(user_id),
-            "status": "online",
-            "commands": [],
-            "current_dir": "root",
-            "items": []
+            "owner_id": int(user_id), "status": "online", "commands": [], "current_dir": "root", "items": []
         }
         
     active_hosts[host_id]["status"] = payload.get("status", "online")
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "root")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
-    # Забираем команды для этого конкретного ПК
     cmds = active_hosts[host_id]["commands"]
     active_hosts[host_id]["commands"] = []
     return {"commands": cmds}
 
+# --- ИСПРАВЛЕННЫЙ ЭНДПОИНТ: ПРИЕМ КАРТИНКИ БЕЗ MULTIPART ---
 @app.post("/upload_screenshot")
-async def upload_screenshot(host_id: str, user_id: int, file: UploadFile = File(...)):
+async def upload_screenshot(request: Request, host_id: str, user_id: int):
     try:
-        file_bytes = await file.read()
+        # Читаем сырые байты напрямую из тела POST-запроса
+        file_bytes = await request.body()
+        if not file_bytes:
+            return {"status": "error", "details": "Empty body"}
+            
         tg_file = BufferedInputFile(file_bytes, filename="stream.jpg")
-        # Картинка летит строго владельцу этого ПК
         await bot.send_photo(chat_id=user_id, photo=tg_file, caption=f"📺 Экран ПК [{host_id}]")
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "details": str(e)}
 
-# --- ИНТЕРФЕЙС БОТА ---
 def get_main_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🖥 Выбрать/Сменить ПК", callback_data="my_hosts")
@@ -88,18 +83,14 @@ def get_main_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     uid = message.chat.id
-    
-    # По умолчанию ставим хост в формат, который генерирует агент
     default_hid = f"host_{uid}"
     if uid not in user_sessions:
         user_sessions[uid] = {"current_host": default_hid}
     
     await message.answer(
-        f"🤖 **Добро пожаловать в единую систему управления ПК!**\n\n"
-        f"Чтобы привязать ваш компьютер к аккаунту:\n"
-        f"1. Запустите установщик программы на вашем ПК.\n"
-        f"2. При запросе данных введите ваш персональный Telegram ID:\n`{uid}`\n\n"
-        f"Как только агент установится и запустится, вы сможете полноценно управлять им через меню ниже.",
+        f"🤖 **Добро пожаловать в систему управления ПК!**\n\n"
+        f"Ваш персональный Telegram ID:\n`{uid}`\n\n"
+        f"Используйте его при настройке или запуске агента.",
         parse_mode="Markdown", reply_markup=get_main_keyboard()
     )
 
@@ -107,17 +98,14 @@ async def cmd_start(message: types.Message):
 async def main_menu(callback: types.CallbackQuery):
     await callback.message.edit_text("💻 Главное меню управления:", reply_markup=get_main_keyboard())
 
-# Меню выбора доступных пользователю ПК
 @dp.callback_query(F.data == "my_hosts")
 async def my_hosts(callback: types.CallbackQuery):
     uid = callback.message.chat.id
     builder = InlineKeyboardBuilder()
-    
-    # Фильтруем все активные хосты в облаке по ID текущего пользователя Telegram
     user_hosts = [hid for hid, data in active_hosts.items() if data.get("owner_id") == uid]
     
     if not user_hosts:
-        await callback.message.answer("ℹ️ У вас пока нет подключенных устройств. Убедитесь, что установщик запущен на ПК и вы указали верный ID.")
+        await callback.message.answer("ℹ️ Нет подключенных устройств. Запустите агент на ПК.")
         await callback.answer()
         return
         
@@ -127,7 +115,7 @@ async def my_hosts(callback: types.CallbackQuery):
         
     builder.button(text="⬅️ В меню", callback_data="main_menu")
     builder.adjust(1)
-    await callback.message.edit_text("🎯 **Выберите компьютер для работы:**", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text("🎯 **Выберите компьютер:**", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("select_host:"))
 async def select_host(callback: types.CallbackQuery):
@@ -135,12 +123,11 @@ async def select_host(callback: types.CallbackQuery):
     target_host = callback.data.split("select_host:")[1]
     user_sessions[uid] = {"current_host": target_host}
     await callback.answer(f"Выбран {target_host}")
-    await callback.message.edit_text(f"Успешно подключено к: `{target_host}`.\nВсе отправляемые команды будут выполняться на этой машине.", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text(f"Подключено к: `{target_host}`.", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
 def get_user_host(uid: int) -> str:
     return user_sessions.get(uid, {}).get("current_host", f"host_{uid}")
 
-# --- ФУНКЦИОНАЛЬНЫЕ КНОПКИ (Пункт 3, 4, 5 из дорожной карты) ---
 @dp.callback_query(F.data == "status_pc")
 async def status_pc(callback: types.CallbackQuery):
     uid = callback.message.chat.id
@@ -152,14 +139,14 @@ async def status_pc(callback: types.CallbackQuery):
     builder.adjust(1)
     
     status = active_hosts.get(hid, {}).get("status", "offline")
-    await callback.message.answer(f"⚙️ **Текущее устройство:** `{hid}`\nСтатус сети: **{status}**", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.answer(f"⚙️ **Устройство:** `{hid}`\nСтатус: **{status}**", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "start_stream")
 async def start_stream(callback: types.CallbackQuery):
     uid = callback.message.chat.id
     hid = get_user_host(uid)
     add_command(hid, "stream", "1")
-    await callback.answer("Запрос кадра экрана отправлен.")
+    await callback.answer("Запрос отправлен.")
 
 @dp.callback_query(F.data == "apps_menu")
 async def apps_menu(callback: types.CallbackQuery):
@@ -183,7 +170,7 @@ async def app_cmd_handler(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "kill_process_prompt")
 async def kill_prompt(callback: types.CallbackQuery):
-    await callback.message.answer("Чтобы завершить процесс, пришлите:\n`kill:имя_файла.exe` (например `kill:fortnite.exe`)")
+    await callback.message.answer("Чтобы завершить процесс, пришлите:\n`kill:имя_файла.exe`")
     await callback.answer()
 
 @dp.message(F.text.startswith("kill:"))
@@ -196,7 +183,7 @@ async def kill_process_msg(message: types.Message):
 
 @dp.callback_query(F.data == "explorer_root")
 async def explorer_root(callback: types.CallbackQuery):
-    await callback.message.answer("Управление файлами:\n• `del:путь` — удалить файл/папку\n• `mkdir:путь` — создать директорию")
+    await callback.message.answer("Управление файлами:\n• `del:путь` — удалить\n• `mkdir:путь` — создать папку")
     await callback.answer()
 
 @dp.message(F.text.startswith("del:"))
