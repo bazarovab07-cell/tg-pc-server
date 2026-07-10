@@ -50,7 +50,6 @@ async def poll(request: Request):
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "C:\\")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
-    # Обработка отчетов о выполнении команд
     report = payload.get("report", "")
     if report:
         if report.startswith("SUCCESS:"):
@@ -60,11 +59,29 @@ async def poll(request: Request):
             msg = report.replace("ERROR:", "")
             await bot.send_message(chat_id=uid, text=f"❌ **Не выполнено (Ошибка):**\n{msg}", parse_mode="Markdown")
             
-    # Обработка больших объемов данных (клипборд, процессы)
     status_data = payload.get("status", "online")
     if status_data.startswith("PROCESSES_LIST:"):
-        procs = status_data.replace("PROCESSES_LIST:", "")
-        await bot.send_message(chat_id=uid, text=f"📋 **Активные процессы:**\n\n{procs}", parse_mode="Markdown")
+        raw_procs = status_data.replace("PROCESSES_LIST:\n", "").strip()
+        
+        builder = InlineKeyboardBuilder()
+        # Каждая строка — это "имя.exe|память"
+        lines = raw_procs.split("\n") if raw_procs else []
+        
+        text_msg = "📋 **Активные процессы на ПК:**\n Нажми кнопку под сообщением, чтобы убить нужный процесс.\n\n"
+        
+        for idx, line in enumerate(lines):
+            if "|" in line:
+                name, mem = line.split("|")
+                text_msg += f"{idx+1}. 🔹 `{name}` ({mem})\n"
+                # Добавляем инлайн-кнопку для завершения (обрезаем если слишком длинное имя)
+                builder.button(text=f"❌ {name}", callback_data=f"kill_proc:{name}")
+        
+        builder.button(text="🔄 Обновить список", callback_data="get_proc_list")
+        builder.button(text="📱 Главное меню", callback_data="main_menu")
+        builder.adjust(2) # Кнопки процессов будут идти по 2 в ряд
+        
+        await bot.send_message(chat_id=uid, text=text_msg, parse_mode="Markdown", reply_markup=builder.as_markup())
+        
     elif status_data.startswith("CLIPBOARD_FROM_PC:"):
         raw_text = status_data.split("CLIPBOARD_FROM_PC:")[1]
         await bot.send_message(chat_id=uid, text=f"📋 **Скопировано на ПК:**\n`{raw_text}`", parse_mode="Markdown")
@@ -113,9 +130,8 @@ async def apps_menu(callback: types.CallbackQuery):
     builder.button(text="📋 Список процессов", callback_data="get_proc_list")
     builder.button(text="🌐 Открыть Браузер", callback_data="app_cmd:browser")
     builder.button(text="🎮 Запустить Steam", callback_data="app_cmd:steam")
-    builder.button(text="❌ Закрыть Приложение (Ввод)", callback_data="kill_process_prompt")
     builder.button(text="⬅️ Назад", callback_data="main_menu")
-    builder.adjust(1, 2, 1, 1)
+    builder.adjust(1, 2, 1)
     await callback.message.edit_text("🎮 **Управление процессами:**", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "get_proc_list")
@@ -123,17 +139,12 @@ async def get_proc_list(callback: types.CallbackQuery):
     add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "processes")
     await callback.answer("Запрос списка процессов отправлен.")
 
-@dp.callback_query(F.data == "kill_process_prompt")
-async def kill_prompt(callback: types.CallbackQuery):
-    await callback.message.answer("Чтобы быстро закрыть приложение, отправь:\n`закрыть:steam` или `закрыть:discord`")
-    await callback.answer()
-
-@dp.message(F.text.startswith("закрыть:"))
-async def kill_smart(message: types.Message):
-    hid = get_user_host(message.chat.id)
-    target = message.text.split("закрыть:")[1].strip()
-    add_command(hid, "kill_smart", target)
-    await message.answer(f"⏳ Отправлен запрос на закрытие: `{target}`")
+# Обработка клика по кнопке процесса
+@dp.callback_query(F.data.startswith("kill_proc:"))
+async def kill_proc_handler(callback: types.CallbackQuery):
+    proc_name = callback.data.split("kill_proc:")[1]
+    add_command(get_user_host(callback.message.chat.id), "kill_smart", proc_name)
+    await callback.answer(f"Убиваем {proc_name}...")
 
 @dp.callback_query(F.data == "explorer_view")
 async def explorer_view(callback: types.CallbackQuery):
