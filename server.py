@@ -15,8 +15,9 @@ active_hosts = {}
 user_sessions = {}     
 
 def add_command(host_id: str, action: str, data: str = ""):
-    host_id = str(host_id).strip()
-    # Если хоста еще нет в active_hosts, инициализируем его структуру, чтобы команда не пропала
+    # Принудительно очищаем ID от невидимых символов и пробелов, переводим в нижний регистр
+    host_id = str(host_id).strip().lower()
+    
     if host_id not in active_hosts:
         active_hosts[host_id] = {
             "owner_id": None, "status": "offline", "commands": [], "current_dir": "root", "items": []
@@ -26,7 +27,7 @@ def add_command(host_id: str, action: str, data: str = ""):
         active_hosts[host_id]["commands"] = []
         
     active_hosts[host_id]["commands"].append({"action": action, "data": data})
-    print(f"[SERVER] Добавлена команда {action} ({data}) для {host_id}")
+    print(f"[SERVER] Добавлена команда {action} ({data}) для чистого хоста: '{host_id}'")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,17 +46,21 @@ async def root():
 
 @app.post("/poll")
 async def poll(request: Request):
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"commands": []}
+        
     host_id = payload.get("host_id")    
     user_id = payload.get("user_id")    
     
     if not host_id or not user_id:
         return {"commands": []}
         
-    host_id = str(host_id).strip()
+    # Форматируем host_id точно так же, как в кнопках бота (строка, без пробелов, нижний регистр)
+    host_id = str(host_id).strip().lower()
     uid = int(user_id)
         
-    # Регистрируем или полностью обновляем структуру хоста
     if host_id not in active_hosts:
         active_hosts[host_id] = {
             "owner_id": uid, "status": "online", "commands": [], "current_dir": "root", "items": []
@@ -63,9 +68,7 @@ async def poll(request: Request):
     else:
         active_hosts[host_id]["owner_id"] = uid
 
-    # Принудительно связываем сессию пользователя с этим хостом при каждом пинге
     user_sessions[uid] = {"current_host": host_id}
-        
     status_data = payload.get("status", "online")
     
     # Обработка буфера обмена С КОМПЬЮТЕРА НА ТЕЛЕФОН
@@ -79,7 +82,7 @@ async def poll(request: Request):
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "root")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
-    # Забираем накопленные команды и очищаем массив на сервере
+    # Отдаем команды агенту и сразу очищаем массив
     cmds = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     return {"commands": cmds}
@@ -100,7 +103,7 @@ async def upload_screenshot(request: Request, host_id: str, user_id: int):
 def get_user_host(uid: int) -> str:
     uid = int(uid)
     if uid in user_sessions and user_sessions[uid].get("current_host"):
-        return str(user_sessions[uid]["current_host"]).strip()
+        return str(user_sessions[uid]["current_host"]).strip().lower()
     return f"host_{uid}"
 
 def get_main_keyboard():
@@ -165,7 +168,7 @@ async def status_pc(callback: types.CallbackQuery):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="📸 Сделать снимок экрана", callback_data="start_stream")
-    builder.button(text="⬅️ Меню", callback_data="main_menu")
+    builder.button(text="⬅️ ...меню", callback_data="main_menu")
     builder.adjust(1)
     
     status = active_hosts.get(hid, {}).get("status", "offline")
