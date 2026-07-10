@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import base64
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -11,8 +12,8 @@ from aiogram.filters import Command
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Твой рабочий токен
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
+# Рендер автоматически выдает этот URL. Если тестируешь локально, используй ngrok
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://YOUR_DOMAIN.onrender.com")
 
 bot = Bot(token=TOKEN)
@@ -21,13 +22,13 @@ dp = Dispatcher()
 # Глобальные хранилища данных
 active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
-last_processed_reports = {}  # host_id -> last_report_text (Защита от дублирования сообщений)
+last_processed_reports = {}  # host_id -> last_report_text
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     webhook_url = f"{RENDER_URL}/webhook"
     logging.info(f"Установка вебхука: {webhook_url}")
-    await bot.set_webhook(url=webhook_url)
+    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     yield
     logging.info("Удаление вебхука...")
     await bot.delete_webhook()
@@ -42,11 +43,12 @@ def get_file_manager_keyboard(items, current_dir):
     folders = [x for x in items if x.get("type") == "folder"]
     files = [x for x in items if x.get("type") == "file"]
     
-    for folder in folders:
+    # Ограничиваем вывод, чтобы кнопки не уперлись в лимиты Telegram (макс 100 кнопок)
+    for folder in folders[:30]:
         name = folder.get("name", "")
         keyboard.append([InlineKeyboardButton(text=f"📁 {name}", callback_data=f"cd_{name}")])
         
-    for file in files:
+    for file in files[:30]:
         name = file.get("name", "")
         size = file.get("size", "0 KB")
         keyboard.append([InlineKeyboardButton(text=f"📄 {name} ({size})", callback_data=f"file_{name}")])
@@ -79,6 +81,8 @@ async def poll(request: Request):
     if not host_id or not uid: 
         return {"commands": [], "clear_report": False}
     
+    uid = int(uid)
+    
     # Регистрация или обновление хоста в сети
     if host_id not in active_hosts:
         active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
@@ -92,7 +96,7 @@ async def poll(request: Request):
     
     last_msg_id = user_sessions[uid].get("last_msg_id")
     
-    # === ИСПРАВЛЕННЫЙ БЛОК АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЙ ===
+    # === БЛОК АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЙ ===
     report = payload.get("report", "")
     should_clear_report = False
     
@@ -100,10 +104,9 @@ async def poll(request: Request):
         text_str = str(report).strip()
         last_report = last_processed_reports.get(host_id, "")
         
-        # Проверяем, не обрабатывали ли мы этот репорт в предыдущем запросе
         if text_str != last_report:
-            last_processed_reports[host_id] = text_str  # Запоминаем текущий репорт
-            should_clear_report = True                  # Даем агенту команду стереть статус
+            last_processed_reports[host_id] = text_str  
+            should_clear_report = True                  
             
             async def send_and_delete_report(chat_id, report_text):
                 try:
@@ -122,11 +125,10 @@ async def poll(request: Request):
                         except Exception:
                             pass
                 except Exception as e:
-                    logging.error(f"Ошибка удаления: {e}")
+                    logging.error(f"Ошибка удаления сообщения: {e}")
 
-            asyncio.create_task(send_and_delete_report(int(uid), text_str))
+            asyncio.create_task(send_and_delete_report(uid, text_str))
         else:
-            # Если агент всё ещё шлёт старый репорт, просим его очистить повторно
             should_clear_report = True
     # === КОНЕЦ БЛОКА АВТОУДАЛЕНИЯ ===
 
@@ -143,7 +145,6 @@ async def poll(request: Request):
 
     # Прием файлов
     if "file_data" in payload and "file_name" in payload:
-        import base64
         file_name = payload.get("file_name")
         raw_data = base64.b64decode(payload.get("file_data"))
         input_file = BufferedInputFile(raw_data, filename=file_name)
@@ -151,7 +152,6 @@ async def poll(request: Request):
 
     # Прием скриншота
     if "screenshot_data" in payload:
-        import base64
         raw_data = base64.b64decode(payload.get("screenshot_data"))
         input_file = BufferedInputFile(raw_data, filename="screenshot.png")
         await bot.send_photo(chat_id=uid, photo=input_file, caption="📸 Скриншот экрана ПК")
@@ -171,26 +171,44 @@ async def poll(request: Request):
             except Exception:
                 pass
 
-    # Забираем накопившиеся команды
+    # Отдаем команды агенту
     commands = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     
-    # Возвращаем команды и флаг сброса отчета агенту
     return {"commands": commands, "clear_report": should_clear_report}
 
 # Хэндлер на команду /start
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     uid = message.from_user.id
-    user_sessions[uid] = {}
-    await message.answer("👋 Привет! Ожидаю подключения твоего PC-агента...")
+    user_sessions[uid] = {"state": None, "last_msg_id": None}
+    
+    # Ищем, нет ли уже онлайн-хоста для этого юзера
+    target_host = None
+    for hid, data in active_hosts.items():
+        if data.get("owner_id") == uid:
+            target_host = hid
+            break
+            
+    if target_host:
+        user_sessions[uid]["current_host"] = target_host
+        kb = get_file_manager_keyboard(active_hosts[target_host]["items"], active_hosts[target_host]["current_dir"])
+        msg = await message.answer(
+            text=f"💻 **Хост найден в сети:** `{target_host}`\n📁 **Путь:** `{active_hosts[target_host]['current_dir']}`",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        user_sessions[uid]["last_msg_id"] = msg.message_id
+    else:
+        await message.answer("👋 Привет! Твой ПК пока оффлайн. Запусти скрипт-агент на компьютере.")
 
 # Хэндлер для отправки консольных команд
 @dp.message()
 async def handle_text_messages(message: types.Message):
     uid = message.from_user.id
-    host_id = user_sessions.get(uid, {}).get("current_host")
-    state = user_sessions.get(uid, {}).get("state")
+    session = user_sessions.get(uid, {})
+    host_id = session.get("current_host")
+    state = session.get("state")
     
     if not host_id or host_id not in active_hosts:
         await message.answer("❌ Нет активного подключения к ПК. Запусти агент.")
@@ -206,7 +224,8 @@ async def handle_text_messages(message: types.Message):
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    host_id = user_sessions.get(uid, {}).get("current_host")
+    session = user_sessions.get(uid, {})
+    host_id = session.get("current_host")
     
     if not host_id or host_id not in active_hosts:
         await callback.answer("❌ Активный ПК не найден или оффлайн.", show_alert=True)
@@ -218,7 +237,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     if data.startswith("cd_"):
         folder_name = data.replace("cd_", "")
         active_hosts[host_id]["commands"].append({"type": "cd", "param": folder_name})
-        await callback.answer("Запрос на смену папки отправлен...")
+        await callback.answer("Смена папки...")
         
     elif data.startswith("file_"):
         file_name = data.replace("file_", "")
@@ -244,17 +263,17 @@ async def handle_callbacks(callback: types.CallbackQuery):
     elif data.startswith("run_"):
         f_name = data.replace("run_", "")
         active_hosts[host_id]["commands"].append({"type": "run_file", "param": f_name})
-        await callback.answer("Запрос на запуск отправлен...")
+        await callback.answer("Запуск файла...")
         
     elif data.startswith("download_"):
         f_name = data.replace("download_", "")
         active_hosts[host_id]["commands"].append({"type": "download_file", "param": f_name})
-        await callback.answer("Скачиваю файл...")
+        await callback.answer("Скачивание...")
 
     elif data.startswith("delete_"):
         f_name = data.replace("delete_", "")
         active_hosts[host_id]["commands"].append({"type": "delete_file", "param": f_name})
-        await callback.answer("Удаляю файл...")
+        await callback.answer("Удаление...")
 
     elif data == "back_to_manager":
         kb = get_file_manager_keyboard(active_hosts[host_id]["items"], active_hosts[host_id]["current_dir"])
@@ -269,15 +288,15 @@ async def handle_callbacks(callback: types.CallbackQuery):
         
     elif data == "show_processes":
         active_hosts[host_id]["commands"].append({"type": "get_processes"})
-        await callback.answer("Запрашиваю список процессов...")
+        await callback.answer("Запрос процессов...")
         
     elif data == "get_clipboard":
         active_hosts[host_id]["commands"].append({"type": "get_clipboard"})
-        await callback.answer("Читаю буфер обмена...")
+        await callback.answer("Чтение буфера...")
 
     elif data == "take_screenshot":
         active_hosts[host_id]["commands"].append({"type": "screenshot"})
-        await callback.answer("Делаю снимок экрана...")
+        await callback.answer("Снимок экрана...")
 
     elif data == "run_cmd":
         user_sessions[uid]["state"] = "awaiting_cmd"
@@ -286,11 +305,16 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     elif data == "pc_shutdown":
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
-        await callback.answer("Команда на выключение ПК отправлена!", show_alert=True)
+        await callback.answer("Команда на выключение отправлена!", show_alert=True)
 
-# Роут для вебхука Telegram
+# Точка входа для вебхуков Telegram
 @app.post("/webhook")
 async def webhook_endpoint(request: Request):
-    update = types.Update.model_validate(await request.json(), context={"bot": bot})
-    await dp.feed_update(bot, update)
-    return {"status": "ok"}
+    try:
+        json_data = await request.json()
+        update = types.Update.model_validate(json_data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error(f"Ошибка в эндпоинте вебхука: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
