@@ -1,227 +1,309 @@
-import asyncio
+import time
 import os
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import BufferedInputFile
+import subprocess
+import webbrowser
+import pystray
+import pyperclip
+import psutil
+from PIL import Image, ImageDraw
+import requests
+import threading
+import tkinter as tk
+from tkinter import messagebox
 
-TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+# Конфигурационные файлы
+CONFIG_FILE = "config.txt"
+USER_ID = 0
+HOST_ID = ""
+SERVER_URL = "https://tg-pc-server.onrender.com"
 
-active_hosts = {}      
-user_sessions = {}     
+last_clipboard = ""
+status_buffer = "online"
+report_buffer = "" 
 
-def add_command(host_id: str, action: str, data: str = ""):
-    host_id = str(host_id).strip().lower()
-    if host_id not in active_hosts:
-        active_hosts[host_id] = {"owner_id": None, "status": "online", "commands": [], "current_dir": "C:\\", "items": []}
-    if "commands" not in active_hosts[host_id]:
-        active_hosts[host_id]["commands"] = []
-    active_hosts[host_id]["commands"].append({"action": action, "data": data})
+# Инициализируем стартовый путь как корень системного диска (например, C:\)
+# Это гарантирует, что ты увидишь файлы самого ПК, а не папку запуска скрипта
+START_DIR = os.path.abspath(os.environ.get('SystemDrive', 'C:\\'))
+os.chdir(START_DIR)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await bot.delete_webhook(drop_pending_updates=True)
-    polling_task = asyncio.create_task(dp.start_polling(bot))
-    yield
-    polling_task.cancel()
-    await bot.session.close()
+SMART_APPS = {
+    "steam": [os.path.expandvars(r"%ProgramFiles(x86)%\Steam\steam.exe"), "steam://"],
+    "discord": [os.path.expandvars(r"%LocalAppData%\Discord\Update.exe"), "discord://"],
+    "browser": ["chrome", "msedge"]
+}
 
-app = FastAPI(lifespan=lifespan)
+# --- ЛОГИКА ТГ-ID КОНФИГУРАЦИИ ---
+def load_config():
+    global USER_ID, HOST_ID
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                uid = int(f.read().strip())
+                if uid > 0:
+                    USER_ID = uid
+                    HOST_ID = f"host_{USER_ID}"
+                    return True
+        except: pass
+    return False
 
-@app.get("/")
-async def root(): return {"status": "working"}
-
-@app.post("/poll")
-async def poll(request: Request):
-    try: payload = await request.json()
-    except: return {"commands": []}
-    
-    host_id = str(payload.get("host_id", "")).strip().lower()
-    uid = int(payload.get("user_id", 0))
-    if not host_id or not uid: return {"commands": []}
-    
-    if host_id not in active_hosts:
-        active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
-    
-    active_hosts[host_id]["current_dir"] = payload.get("current_dir", "C:\\")
-    active_hosts[host_id]["items"] = payload.get("items", [])
-    
-    report = payload.get("report", "")
-    if report:
-        if report.startswith("SUCCESS:"):
-            msg = report.replace("SUCCESS:", "")
-            await bot.send_message(chat_id=uid, text=f"✅ **Выполнено успешно:**\n{msg}", parse_mode="Markdown")
-        elif report.startswith("ERROR:"):
-            msg = report.replace("ERROR:", "")
-            await bot.send_message(chat_id=uid, text=f"❌ **Не выполнено (Ошибка):**\n{msg}", parse_mode="Markdown")
-            
-    status_data = payload.get("status", "online")
-    if status_data.startswith("PROCESSES_LIST:"):
-        raw_procs = status_data.replace("PROCESSES_LIST:\n", "").strip()
-        builder = InlineKeyboardBuilder()
-        lines = raw_procs.split("\n") if raw_procs else []
-        
-        text_msg = "📋 **Активные процессы на ПК:**\n Нажми кнопку под сообщением, чтобы убить нужный процесс.\n\n"
-        for idx, line in enumerate(lines):
-            if "|" in line:
-                name, mem = line.split("|")
-                text_msg += f"{idx+1}. 🔹 `{name}` ({mem})\n"
-                builder.button(text=f"❌ {name}", callback_data=f"kill_proc:{name}")
-        
-        builder.button(text="🔄 Обновить список", callback_data="get_proc_list")
-        builder.button(text="📱 Главное меню", callback_data="main_menu")
-        builder.adjust(2)
-        await bot.send_message(chat_id=uid, text=text_msg, parse_mode="Markdown", reply_markup=builder.as_markup())
-        
-    elif status_data.startswith("CLIPBOARD_FROM_PC:"):
-        raw_text = status_data.split("CLIPBOARD_FROM_PC:")[1]
-        await bot.send_message(chat_id=uid, text=f"📋 **Скопировано на ПК:**\n`{raw_text}`", parse_mode="Markdown")
-    
-    cmds = active_hosts[host_id].get("commands", [])
-    active_hosts[host_id]["commands"] = [] 
-    return {"commands": cmds}
-
-@app.post("/upload_screenshot")
-async def upload_screenshot(request: Request, host_id: str, user_id: int):
+def save_config(uid_str):
+    global USER_ID, HOST_ID
     try:
-        file_bytes = await request.body()
-        if not file_bytes: return {"status": "error"}
-        tg_file = BufferedInputFile(file_bytes, filename="stream.jpg")
-        await bot.send_photo(chat_id=int(user_id), photo=tg_file, caption=f"📸 Скриншот экрана ПК [{host_id}] ✅")
-        return {"status": "success"}
-    except Exception as e: return {"status": "error", "details": str(e)}
+        uid = int(uid_str.strip())
+        with open(CONFIG_FILE, "w") as f:
+            f.write(str(uid))
+        USER_ID = uid
+        HOST_ID = f"host_{USER_ID}"
+        return True
+    except:
+        return False
 
-def get_user_host(uid: int) -> str:
-    return str(user_sessions.get(uid, {}).get("current_host", f"host_{uid}")).strip().lower()
+# --- СИСТЕМНЫЙ ТРЕЙ ---
+icon_tray = None
 
-def get_main_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🖥 Выбрать ПК", callback_data="my_hosts")
-    builder.button(text="📸 Скриншот экрана", callback_data="start_stream")
-    builder.button(text="📁 Проводник файлов", callback_data="explorer_view")
-    builder.button(text="🎮 Процессы и Приложения", callback_data="apps_menu")
-    builder.button(text="🔌 Питание", callback_data="power_menu")
-    builder.adjust(1, 2, 2)
-    return builder.as_markup()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    uid = message.chat.id
-    user_sessions[uid] = {"current_host": f"host_{uid}"}
+def create_tray_icon():
+    global icon_tray
+    image = Image.new('RGB', (64, 64), color=(0, 0, 0))
+    dc = ImageDraw.Draw(image)
+    dc.rectangle([16, 16, 48, 48], fill=(0, 128, 255))
     
-    # Твой ID, который нужно будет ввести на ПК
-    your_id = message.from_user.id
-    
-    builder = InlineKeyboardBuilder()
-    # Замени на реальную ссылку, куда загрузишь ехе (Яндекс.Диск, GitHub, Google Диск или прямая ссылка)
-    builder.button(text="📥 Скачать Агента (.exe)", url="https://github.com/твой_профиль/твой_репозиторий/releases/download/v1.0/agent.exe")
-    builder.button(text="🖥 Открыть панель управления", callback_data="main_menu")
-    builder.adjust(1)
-    
-    welcome_text = (
-        f"🤖 **Привет! Добро пожаловать в панель управления ПК.**\n\n"
-        f"Твой уникальный Telegram ID: `{your_id}`\n"
-        f"Скопируй его и введи в окне программы на компьютере при первом запуске.\n\n"
-        f"Скачай актуальную версию агента по кнопке ниже:"
+    menu = pystray.Menu(
+        pystray.MenuItem("Открыть окно", lambda: show_window()),
+        pystray.MenuItem("Выход", lambda: exit_agent())
     )
-    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    icon_tray = pystray.Icon("PC-Agent", image, "PC Agent", menu=menu)
+    icon_tray.run()
 
-@dp.callback_query(F.data == "main_menu")
-async def main_menu(callback: types.CallbackQuery):
-    await callback.message.edit_text("💻 Главное меню управления:", reply_markup=get_main_keyboard())
+def exit_agent():
+    if icon_tray:
+        icon_tray.stop()
+    os._exit(0)
 
-@dp.callback_query(F.data == "apps_menu")
-async def apps_menu(callback: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📋 Список процессов", callback_data="get_proc_list")
-    builder.button(text="🌐 Открыть Браузер", callback_data="app_cmd:browser")
-    builder.button(text="🎮 Запустить Steam", callback_data="app_cmd:steam")
-    builder.button(text="⬅️ Назад", callback_data="main_menu")
-    builder.adjust(1, 2, 1)
-    await callback.message.edit_text("🎮 **Управление процессами:**", reply_markup=builder.as_markup())
+# --- GUI ОКНО (TKINTER) ---
+root = None
+id_entry = None
+status_label = None
 
-@dp.callback_query(F.data == "get_proc_list")
-async def get_proc_list(callback: types.CallbackQuery):
-    add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "processes")
-    await callback.answer("Запрос списка процессов отправлен.")
-
-@dp.callback_query(F.data.startswith("kill_proc:"))
-async def kill_proc_handler(callback: types.CallbackQuery):
-    proc_name = callback.data.split("kill_proc:")[1]
-    add_command(get_user_host(callback.message.chat.id), "kill_smart", proc_name)
-    await callback.answer(f"Убиваем {proc_name}...")
-
-@dp.callback_query(F.data == "explorer_view")
-async def explorer_view(callback: types.CallbackQuery):
-    uid = callback.message.chat.id
-    hid = get_user_host(uid)
-    host_data = active_hosts.get(hid, {})
-    current_dir = host_data.get("current_dir", "C:\\")
-    items = host_data.get("items", [])
+def setup_gui():
+    global root, id_entry, status_label
+    root = tk.Tk()
+    root.title("PC Remote Agent Status")
+    root.geometry("400x250")
+    root.resizable(False, False)
     
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⬅️ Назад (Вверх)", callback_data="cd_back")
-    for item in items[:15]:
-        name = item.get("name")
-        icon = "📁" if item.get("is_dir") else "📄"
-        builder.button(text=f"{icon} {name}", callback_data=f"click_item:{name}")
-    builder.button(text="🔄 Обновить папку", callback_data="refresh_dir")
-    builder.button(text="📱 Главное меню", callback_data="main_menu")
-    builder.adjust(1)
-    await callback.message.edit_text(f"📁 **Текущий путь:** `{current_dir}`\nПоказано первых 15 элементов:", parse_mode="Markdown", reply_markup=builder.as_markup())
+    root.protocol("WM_DELETE_WINDOW", hide_window)
+    
+    title_label = tk.Label(root, text="PC Remote Control Agent", font=("Arial", 14, "bold"))
+    title_label.pack(pady=10)
+    
+    status_label = tk.Label(root, text="Проверка конфигурации...", font=("Arial", 10), fg="orange")
+    status_label.pack(pady=5)
 
-@dp.callback_query(F.data == "refresh_dir")
-async def refresh_dir(callback: types.CallbackQuery):
-    add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "dir")
-    await callback.answer("Обновляю файлы...")
-    await asyncio.sleep(1)
-    await explorer_view(callback)
+    if not load_config():
+        status_label.config(text="⚠️ Требуется первоначальная настройка ID!", fg="red")
+        
+        lbl = tk.Label(root, text="Введите ваш Telegram ID:")
+        lbl.pack(pady=5)
+        
+        id_entry = tk.Entry(root, font=("Arial", 12), justify="center", width=20)
+        id_entry.pack(pady=5)
+        
+        btn = tk.Button(root, text="Сохранить и Запустить", command=on_save_clicked, bg="#0080FF", fg="white", font=("Arial", 10, "bold"))
+        btn.pack(pady=10)
+    else:
+        show_active_status()
+        
+    btn_hide = tk.Button(root, text="Свернуть в трей", command=hide_window)
+    btn_hide.pack(side="bottom", pady=15)
+    
+    root.mainloop()
 
-@dp.callback_query(F.data.startswith("click_item:"))
-async def click_item(callback: types.CallbackQuery):
-    item_name = callback.data.split("click_item:")[1]
-    add_command(get_user_host(callback.message.chat.id), "cd_into", item_name)
-    await callback.answer(f"Входим в {item_name}")
-    await asyncio.sleep(1) 
-    await explorer_view(callback)
+def on_save_clicked():
+    uid_input = id_entry.get()
+    if save_config(uid_input):
+        messagebox.showinfo("Успех", "Telegram ID успешно сохранен! Агент запущен.")
+        for widget in root.winfo_children():
+            if isinstance(widget, (tk.Entry, tk.Button, tk.Label)) and widget != status_label and widget.cget("text") != "Свернуть в трей":
+                if "PC Remote" not in str(widget.cget("text")):
+                    widget.destroy()
+        
+        show_active_status()
+        threading.Thread(target=agent_loop, daemon=True).start()
+    else:
+        messagebox.showerror("Ошибка", "Неверный формат Telegram ID. Введите только цифры!")
 
-@dp.callback_query(F.data == "cd_back")
-async def cd_back(callback: types.CallbackQuery):
-    add_command(get_user_host(callback.message.chat.id), "cd_back", "")
-    await callback.answer("Назад")
-    await asyncio.sleep(1)
-    await explorer_view(callback)
+def show_active_status():
+    status_label.config(text=f"✅ Агент запущен и работает\nТекущий хост: host_{USER_ID}", fg="green", font=("Arial", 11, "bold"))
 
-@dp.callback_query(F.data == "start_stream")
-async def start_stream(callback: types.CallbackQuery):
-    add_command(get_user_host(callback.message.chat.id), "stream", "1")
-    await callback.answer("Скриншот запрошен.")
+def hide_window():
+    root.withdraw() 
 
-@dp.callback_query(F.data.startswith("app_cmd:"))
-async def app_cmd_handler(callback: types.CallbackQuery):
-    cmd = callback.data.split("app_cmd:")[1]
-    add_command(get_user_host(callback.message.chat.id), "run_app", cmd)
-    await callback.answer("Запуск...")
+def show_window():
+    if root:
+        root.deiconify() 
 
-@dp.callback_query(F.data == "power_menu")
-async def power_menu(callback: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🛑 Выключение", callback_data="p_cmd:shutdown")
-    builder.button(text="🔄 Перезагрузка", callback_data="p_cmd:restart")
-    builder.button(text="⬅️ Назад", callback_data="main_menu")
-    builder.adjust(1)
-    await callback.message.edit_text("🔌 Команды питания:", reply_markup=builder.as_markup())
+# --- СИСТЕМНЫЕ ФУНКЦИИ И ЦИКЛ ---
+def get_processes_list():
+    procs = []
+    seen_names = set()
+    for proc in psutil.process_iter(['name', 'memory_info']):
+        try:
+            name = proc.info['name']
+            if name not in seen_names and name.lower() != "system":
+                procs.append((name, proc.info['memory_info'].rss))
+                seen_names.add(name)
+        except: pass
+    procs = sorted(procs, key=lambda x: x[1], reverse=True)[:10]
+    return "\n".join([f"{name}|{round(mem / 1024 / 1024, 1)} MB" for name, mem in procs])
 
-@dp.callback_query(F.data.startswith("p_cmd:"))
-async def power_cmd(callback: types.CallbackQuery):
-    action = callback.data.split("p_cmd:")[1]
-    add_command(get_user_host(callback.message.chat.id), "power", action)
-    await callback.answer("Команда отправлена.")
+def get_directory_items():
+    items = []
+    try:
+        # Получаем абсолютный текущий путь на ПК пользователя
+        current_path = os.getcwd()
+        for entry in os.scandir(current_path):
+            try:
+                # Пропускаем скрытые и системные файлы, чтобы не захламлять ТГ
+                if not entry.name.startswith('$') and not entry.name.startswith('.'):
+                    items.append({"name": entry.name, "is_dir": entry.is_dir()})
+            except: pass
+    except Exception as e:
+        items.append({"name": f"Ошибка доступа: {str(e)}", "is_dir": False})
+    
+    # Сортируем: сначала папки, потом файлы
+    return sorted(items, key=lambda x: not x['is_dir'])[:15]
+
+def execute_command(cmd_dict):
+    global status_buffer, report_buffer
+    action = cmd_dict.get("action")
+    data = cmd_dict.get("data", "")
+    
+    try:
+        if action == "stream":
+            import mss
+            with mss.mss() as sct:
+                sct.shot(output="stream.jpg")
+            if os.path.exists("stream.jpg"):
+                with open("stream.jpg", "rb") as f:
+                    requests.post(f"{SERVER_URL}/upload_screenshot?host_id={HOST_ID}&user_id={USER_ID}", data=f.read(), timeout=15)
+                os.remove("stream.jpg")
+                report_buffer = "SUCCESS:Скриншот успешно отправлен на телефон."
+            else:
+                report_buffer = "ERROR:Не удалось создать файл скриншота."
+                
+        elif action == "list_dir_or_proc":
+            if data == "processes":
+                status_buffer = f"PROCESSES_LIST:\n{get_processes_list()}"
+                report_buffer = "SUCCESS:Список процессов успешно загружен."
+            elif data == "dir":
+                status_buffer = "online"
+                report_buffer = "SUCCESS:Список файлов обновлен."
+
+        elif action == "kill_smart":
+            target = data.lower()
+            killed = False
+            for proc in psutil.process_iter(['name']):
+                try:
+                    if proc.info['name'].lower() == target:
+                        proc.kill()
+                        killed = True
+                except: pass
+            if killed: report_buffer = f"SUCCESS:Процесс `{data}` жестко завершен кнопкой."
+            else: report_buffer = f"ERROR:Не удалось закрыть `{data}`, возможно он уже закрыт."
+            
+        elif action == "run_app":
+            opened = False
+            if data in SMART_APPS:
+                paths = SMART_APPS[data]
+                for p in paths:
+                    try:
+                        if "://" in p or p in ["chrome", "msedge"]: 
+                            webbrowser.open(p)
+                            opened = True
+                        elif os.path.exists(p): 
+                            subprocess.Popen(p)
+                            opened = True
+                        break
+                    except: pass
+            else:
+                try: 
+                    webbrowser.open(data)
+                    opened = True
+                except: pass
+            
+            if opened: report_buffer = f"SUCCESS:Приложение `{data}` запущено."
+            else: report_buffer = f"ERROR:Не удалось запустить `{data}`."
+
+        elif action == "cd_into":
+            # Вычисляем полный путь для перехода на ПК
+            target_path = os.path.abspath(os.path.join(os.getcwd(), data))
+            if os.path.isdir(target_path): 
+                os.chdir(target_path)
+                report_buffer = f"SUCCESS:Переход в папку `{data}`"
+            else: 
+                report_buffer = f"ERROR:`{data}` не является папкой или к ней нет доступа."
+                
+        elif action == "cd_back":
+            current_path = os.getcwd()
+            parent_path = os.path.abspath(os.path.join(current_path, ".."))
+            
+            if current_path == parent_path:
+                report_buffer = "ERROR:Вы уже в корневом каталоге диска."
+            else:
+                os.chdir(parent_path)
+                report_buffer = f"SUCCESS:Вы перешли выше. Текущий путь: {parent_path}"
+                
+        elif action == "power":
+            if data == "shutdown":
+                report_buffer = "SUCCESS:Компьютер выключается..."
+                os.system("shutdown /s /t 5")
+            elif data == "restart":
+                report_buffer = "SUCCESS:Компьютер перезагружается..."
+                os.system("shutdown /r /t 5")
+                
+        elif action == "update_clipboard":
+            pyperclip.copy(data)
+            report_buffer = "SUCCESS:Текст помещен в буфер обмена ПК."
+            
+    except Exception as e:
+        report_buffer = f"ERROR:Сбой при выполнении {action}: {str(e)}"
+
+def agent_loop():
+    global last_clipboard, status_buffer, report_buffer
+    while USER_ID == 0:
+        time.sleep(1)
+        
+    while True:
+        try:
+            try: current_clip = pyperclip.paste()
+            except: current_clip = ""
+                
+            send_status = status_buffer
+            if current_clip and current_clip != last_clipboard:
+                send_status = f"CLIPBOARD_FROM_PC:{current_clip}"
+                last_clipboard = current_clip
+            
+            if status_buffer.startswith("PROCESSES_LIST:"):
+                status_buffer = "online"
+
+            payload = {
+                "host_id": HOST_ID, "user_id": str(USER_ID),
+                "status": send_status, "current_dir": os.getcwd(),
+                "items": get_directory_items(),
+                "report": report_buffer
+            }
+            report_buffer = ""
+
+            response = requests.post(f"{SERVER_URL}/poll", json=payload, timeout=10)
+            if response.status_code == 200:
+                for cmd in response.json().get("commands", []):
+                    execute_command(cmd)
+        except: pass
+        time.sleep(2)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    if load_config():
+        threading.Thread(target=agent_loop, daemon=True).start()
+        
+    threading.Thread(target=create_tray_icon, daemon=True).start()
+    setup_gui()
