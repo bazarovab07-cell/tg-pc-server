@@ -50,6 +50,17 @@ async def poll(request: Request):
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "C:\\")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
+    # Обработка отчетов о выполнении команд
+    report = payload.get("report", "")
+    if report:
+        if report.startswith("SUCCESS:"):
+            msg = report.replace("SUCCESS:", "")
+            await bot.send_message(chat_id=uid, text=f"✅ **Выполнено успешно:**\n{msg}", parse_mode="Markdown")
+        elif report.startswith("ERROR:"):
+            msg = report.replace("ERROR:", "")
+            await bot.send_message(chat_id=uid, text=f"❌ **Не выполнено (Ошибка):**\n{msg}", parse_mode="Markdown")
+            
+    # Обработка больших объемов данных (клипборд, процессы)
     status_data = payload.get("status", "online")
     if status_data.startswith("PROCESSES_LIST:"):
         procs = status_data.replace("PROCESSES_LIST:", "")
@@ -61,6 +72,17 @@ async def poll(request: Request):
     cmds = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     return {"commands": cmds}
+
+@app.post("/upload_screenshot")
+async def upload_screenshot(request: Request, host_id: str, user_id: int):
+    try:
+        file_bytes = await request.body()
+        if not file_bytes: return {"status": "error"}
+        tg_file = BufferedInputFile(file_bytes, filename="stream.jpg")
+        await bot.send_photo(chat_id=int(user_id), photo=tg_file, caption=f"📸 Скриншот экрана ПК [{host_id}] ✅")
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "details": str(e)}
 
 def get_user_host(uid: int) -> str:
     return str(user_sessions.get(uid, {}).get("current_host", f"host_{uid}")).strip().lower()
@@ -98,8 +120,7 @@ async def apps_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "get_proc_list")
 async def get_proc_list(callback: types.CallbackQuery):
-    hid = get_user_host(callback.message.chat.id)
-    add_command(hid, "list_dir_or_proc", "processes")
+    add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "processes")
     await callback.answer("Запрос списка процессов отправлен.")
 
 @dp.callback_query(F.data == "kill_process_prompt")
@@ -114,7 +135,6 @@ async def kill_smart(message: types.Message):
     add_command(hid, "kill_smart", target)
     await message.answer(f"⏳ Отправлен запрос на закрытие: `{target}`")
 
-# --- УМНЫЙ ПРОВОДНИК ФАЙЛОВ ---
 @dp.callback_query(F.data == "explorer_view")
 async def explorer_view(callback: types.CallbackQuery):
     uid = callback.message.chat.id
@@ -126,11 +146,9 @@ async def explorer_view(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад (Вверх)", callback_data="cd_back")
     
-    for item in items[:15]: # Ограничим до 15 элементов, чтобы кнопки влезли
+    for item in items[:15]:
         name = item.get("name")
-        is_dir = item.get("is_dir")
-        icon = "📁" if is_dir else "📄"
-        # Передаем индекс элемента
+        icon = "📁" if item.get("is_dir") else "📄"
         builder.button(text=f"{icon} {name}", callback_data=f"click_item:{name}")
         
     builder.button(text="🔄 Обновить папку", callback_data="refresh_dir")
@@ -141,28 +159,26 @@ async def explorer_view(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "refresh_dir")
 async def refresh_dir(callback: types.CallbackQuery):
-    hid = get_user_host(callback.message.chat.id)
-    add_command(hid, "list_dir_or_proc", "dir")
-    await callback.answer("Обновляю список файлов...")
+    add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "dir")
+    await callback.answer("Обновляю файлы...")
+    await asyncio.sleep(1)
+    await explorer_view(callback)
 
 @dp.callback_query(F.data.startswith("click_item:"))
 async def click_item(callback: types.CallbackQuery):
-    hid = get_user_host(callback.message.chat.id)
     item_name = callback.data.split("click_item:")[1]
-    add_command(hid, "cd_into", item_name)
+    add_command(get_user_host(callback.message.chat.id), "cd_into", item_name)
     await callback.answer(f"Входим в {item_name}")
-    await asyncio.sleep(1) # Даем агенту время обновить данные
+    await asyncio.sleep(1) 
     await explorer_view(callback)
 
 @dp.callback_query(F.data == "cd_back")
 async def cd_back(callback: types.CallbackQuery):
-    hid = get_user_host(callback.message.chat.id)
-    add_command(hid, "cd_back", "")
-    await callback.answer("Переход на уровень выше")
+    add_command(get_user_host(callback.message.chat.id), "cd_back", "")
+    await callback.answer("Назад")
     await asyncio.sleep(1)
     await explorer_view(callback)
 
-# Остальные callback (скриншоты, питание) остаются без изменений...
 @dp.callback_query(F.data == "start_stream")
 async def start_stream(callback: types.CallbackQuery):
     add_command(get_user_host(callback.message.chat.id), "stream", "1")
@@ -172,7 +188,7 @@ async def start_stream(callback: types.CallbackQuery):
 async def app_cmd_handler(callback: types.CallbackQuery):
     cmd = callback.data.split("app_cmd:")[1]
     add_command(get_user_host(callback.message.chat.id), "run_app", cmd)
-    await callback.answer("Запущено.")
+    await callback.answer("Запуск...")
 
 @dp.callback_query(F.data == "power_menu")
 async def power_menu(callback: types.CallbackQuery):
@@ -187,7 +203,7 @@ async def power_menu(callback: types.CallbackQuery):
 async def power_cmd(callback: types.CallbackQuery):
     action = callback.data.split("p_cmd:")[1]
     add_command(get_user_host(callback.message.chat.id), "power", action)
-    await callback.answer("Команда питания отправлена.")
+    await callback.answer("Команда отправлена.")
 
 if __name__ == "__main__":
     import uvicorn
