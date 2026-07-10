@@ -15,11 +15,18 @@ active_hosts = {}
 user_sessions = {}     
 
 def add_command(host_id: str, action: str, data: str = ""):
-    if host_id in active_hosts:
-        if "commands" not in active_hosts[host_id]:
-            active_hosts[host_id]["commands"] = []
-        active_hosts[host_id]["commands"].append({"action": action, "data": data})
-        print(f"[SERVER] Добавлена команда {action} для {host_id}")
+    host_id = str(host_id).strip()
+    # Если хоста еще нет в active_hosts, инициализируем его структуру, чтобы команда не пропала
+    if host_id not in active_hosts:
+        active_hosts[host_id] = {
+            "owner_id": None, "status": "offline", "commands": [], "current_dir": "root", "items": []
+        }
+    
+    if "commands" not in active_hosts[host_id]:
+        active_hosts[host_id]["commands"] = []
+        
+    active_hosts[host_id]["commands"].append({"action": action, "data": data})
+    print(f"[SERVER] Добавлена команда {action} ({data}) для {host_id}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,16 +52,19 @@ async def poll(request: Request):
     if not host_id or not user_id:
         return {"commands": []}
         
-    # Регистрируем или обновляем хост
+    host_id = str(host_id).strip()
+    uid = int(user_id)
+        
+    # Регистрируем или полностью обновляем структуру хоста
     if host_id not in active_hosts:
         active_hosts[host_id] = {
-            "owner_id": int(user_id), "status": "online", "commands": [], "current_dir": "root", "items": []
+            "owner_id": uid, "status": "online", "commands": [], "current_dir": "root", "items": []
         }
-    
-    # Автоматически привязываем пользователя к его хосту, если привязка слетела
-    uid = int(user_id)
-    if uid not in user_sessions or user_sessions[uid].get("current_host") != host_id:
-        user_sessions[uid] = {"current_host": host_id}
+    else:
+        active_hosts[host_id]["owner_id"] = uid
+
+    # Принудительно связываем сессию пользователя с этим хостом при каждом пинге
+    user_sessions[uid] = {"current_host": host_id}
         
     status_data = payload.get("status", "online")
     
@@ -69,8 +79,9 @@ async def poll(request: Request):
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "root")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
+    # Забираем накопленные команды и очищаем массив на сервере
     cmds = active_hosts[host_id].get("commands", [])
-    active_hosts[host_id]["commands"] = [] # Очищаем массив после выдачи
+    active_hosts[host_id]["commands"] = [] 
     return {"commands": cmds}
 
 @app.post("/upload_screenshot")
@@ -81,21 +92,21 @@ async def upload_screenshot(request: Request, host_id: str, user_id: int):
             return {"status": "error", "details": "Empty body"}
             
         tg_file = BufferedInputFile(file_bytes, filename="stream.jpg")
-        await bot.send_photo(chat_id=user_id, photo=tg_file, caption=f"📺 Экран ПК [{host_id}]")
+        await bot.send_photo(chat_id=int(user_id), photo=tg_file, caption=f"📺 Экран ПК [{host_id}]")
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "details": str(e)}
 
 def get_user_host(uid: int) -> str:
-    # Возвращает текущий привязанный хост или дефолтный по маске
+    uid = int(uid)
     if uid in user_sessions and user_sessions[uid].get("current_host"):
-        return user_sessions[uid]["current_host"]
+        return str(user_sessions[uid]["current_host"]).strip()
     return f"host_{uid}"
 
 def get_main_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🖥 Выбрать/Сменить ПК", callback_data="my_hosts")
-    builder.button(text="📺 Статус и Стрим экрана", callback_data="status_pc")
+    builder.button(text="📺 Status и Стрим экрана", callback_data="status_pc")
     builder.button(text="📁 Управление Файлами", callback_data="explorer_root")
     builder.button(text="🎮 Команды & Процессы", callback_data="apps_menu")
     builder.button(text="🔌 Управление Питанием", callback_data="power_menu")
