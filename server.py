@@ -16,7 +16,10 @@ user_sessions = {}
 
 def add_command(host_id: str, action: str, data: str = ""):
     if host_id in active_hosts:
+        if "commands" not in active_hosts[host_id]:
+            active_hosts[host_id]["commands"] = []
         active_hosts[host_id]["commands"].append({"action": action, "data": data})
+        print(f"[SERVER] Добавлена команда {action} для {host_id}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -42,24 +45,37 @@ async def poll(request: Request):
     if not host_id or not user_id:
         return {"commands": []}
         
+    # Регистрируем или обновляем хост
     if host_id not in active_hosts:
         active_hosts[host_id] = {
             "owner_id": int(user_id), "status": "online", "commands": [], "current_dir": "root", "items": []
         }
+    
+    # Автоматически привязываем пользователя к его хосту, если привязка слетела
+    uid = int(user_id)
+    if uid not in user_sessions or user_sessions[uid].get("current_host") != host_id:
+        user_sessions[uid] = {"current_host": host_id}
         
-    active_hosts[host_id]["status"] = payload.get("status", "online")
+    status_data = payload.get("status", "online")
+    
+    # Обработка буфера обмена С КОМПЬЮТЕРА НА ТЕЛЕФОН
+    if status_data.startswith("CLIPBOARD_FROM_PC:"):
+        raw_text = status_data.split("CLIPBOARD_FROM_PC:")[1]
+        await bot.send_message(chat_id=uid, text=f"📋 **Скопировано на ПК:**\n`{raw_text}`", parse_mode="Markdown")
+        active_hosts[host_id]["status"] = "online"
+    else:
+        active_hosts[host_id]["status"] = status_data
+        
     active_hosts[host_id]["current_dir"] = payload.get("current_dir", "root")
     active_hosts[host_id]["items"] = payload.get("items", [])
     
-    cmds = active_hosts[host_id]["commands"]
-    active_hosts[host_id]["commands"] = []
+    cmds = active_hosts[host_id].get("commands", [])
+    active_hosts[host_id]["commands"] = [] # Очищаем массив после выдачи
     return {"commands": cmds}
 
-# --- ИСПРАВЛЕННЫЙ ЭНДПОИНТ: ПРИЕМ КАРТИНКИ БЕЗ MULTIPART ---
 @app.post("/upload_screenshot")
 async def upload_screenshot(request: Request, host_id: str, user_id: int):
     try:
-        # Читаем сырые байты напрямую из тела POST-запроса
         file_bytes = await request.body()
         if not file_bytes:
             return {"status": "error", "details": "Empty body"}
@@ -69,6 +85,12 @@ async def upload_screenshot(request: Request, host_id: str, user_id: int):
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "details": str(e)}
+
+def get_user_host(uid: int) -> str:
+    # Возвращает текущий привязанный хост или дефолтный по маске
+    if uid in user_sessions and user_sessions[uid].get("current_host"):
+        return user_sessions[uid]["current_host"]
+    return f"host_{uid}"
 
 def get_main_keyboard():
     builder = InlineKeyboardBuilder()
@@ -88,9 +110,9 @@ async def cmd_start(message: types.Message):
         user_sessions[uid] = {"current_host": default_hid}
     
     await message.answer(
-        f"🤖 **Добро пожаловать в систему управления ПК!**\n\n"
-        f"Ваш персональный Telegram ID:\n`{uid}`\n\n"
-        f"Используйте его при настройке или запуске агента.",
+        f"🤖 **Система управления ПК готова к работе!**\n\n"
+        f"Ваш ID: `{uid}`\n"
+        f"Текущий выбранный ПК: `{get_user_host(uid)}`",
         parse_mode="Markdown", reply_markup=get_main_keyboard()
     )
 
@@ -105,7 +127,7 @@ async def my_hosts(callback: types.CallbackQuery):
     user_hosts = [hid for hid, data in active_hosts.items() if data.get("owner_id") == uid]
     
     if not user_hosts:
-        await callback.message.answer("ℹ️ Нет подключенных устройств. Запустите агент на ПК.")
+        await callback.message.answer("ℹ️ Нет активных устройств в сети. Запустите агент.")
         await callback.answer()
         return
         
@@ -125,9 +147,6 @@ async def select_host(callback: types.CallbackQuery):
     await callback.answer(f"Выбран {target_host}")
     await callback.message.edit_text(f"Подключено к: `{target_host}`.", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
-def get_user_host(uid: int) -> str:
-    return user_sessions.get(uid, {}).get("current_host", f"host_{uid}")
-
 @dp.callback_query(F.data == "status_pc")
 async def status_pc(callback: types.CallbackQuery):
     uid = callback.message.chat.id
@@ -146,7 +165,7 @@ async def start_stream(callback: types.CallbackQuery):
     uid = callback.message.chat.id
     hid = get_user_host(uid)
     add_command(hid, "stream", "1")
-    await callback.answer("Запрос отправлен.")
+    await callback.answer("Запрос скриншота отправлен.")
 
 @dp.callback_query(F.data == "apps_menu")
 async def apps_menu(callback: types.CallbackQuery):
@@ -211,17 +230,15 @@ async def power_cmd(callback: types.CallbackQuery):
     add_command(hid, "power", action)
     await callback.answer("Сигнал питания отправлен.")
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
 # --- СИНХРОНИЗАЦИЯ БУФЕРА ОБМЕНА ИЗ ТЕЛЕФОНА НА ПК ---
 @dp.message(F.text & ~F.text.startswith("/") & ~F.text.startswith("kill:") & ~F.text.startswith("del:"))
 async def handle_text_for_clipboard(message: types.Message):
     uid = message.chat.id
     hid = get_user_host(uid)
-    
-    # Отправляем текст сообщения как команду обновления буфера обмена на ПК
     add_command(hid, "update_clipboard", message.text)
     await message.answer(f"📋 Текст отправлен в буфер обмена устройства `{hid}`!")
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
