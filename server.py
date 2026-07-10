@@ -1,185 +1,178 @@
 import asyncio
-from fastapi import FastAPI
-from pydantic import BaseModel
-import uvicorn
+import os
+from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ТОКЕН ТВОЕГО БОТА
-TOKEN = "8889355917:AAFYsn7EZdO9ljP4vNbJR09m4Tbom_oG1_A"
+# --- НАСТРОЙКИ ---
+# Вставь сюда СВОЙ НОВЫЙ ТОКЕН, полученный от @BotFather
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 
+app = FastAPI()
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-app = FastAPI()
 
-# База данных в оперативной памяти сервера
-user_sessions = {}
-command_queues = {}
+# Хранилище состояний
+# {user_id: {"commands": [...], "status": "offline", "current_dir": "root", "items": []}}
+active_hosts = {}
+# {user_id: {"action": ..., "data": ...}}
 command_results = {}
-
-class AgentReport(BaseModel):
-    user_id: int
-    status: str
-    current_dir: str = "root"
-    items: list = []
-    result_type: str = "none"
-    result_data: str = ""
-
-# --- HTTP API ДЛЯ СВЯЗИ С АГЕНТОМ (.EXE) ---
-@app.post("/poll")
-async def poll_commands(report: AgentReport):
-    user_id = report.user_id
-    
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {"path": "root", "page": 0}
-    
-    user_sessions[user_id]["status"] = "online"
-    user_sessions[user_id]["items"] = report.items
-    if report.current_dir != "stay":
-        user_sessions[user_id]["path"] = report.current_dir
-
-    if report.result_type != "none":
-        command_results[user_id] = {"type": report.result_type, "data": report.result_data}
-
-    queue = command_queues.get(user_id, [])
-    command_queues[user_id] = [] 
-    return {"commands": queue}
-
-
-# --- ЛОГИКА ТЕЛЕГРАМ БОТА ---
-
-def get_help_text():
-    return (
-        "❓ **Справка по мультихост-платформе управления ПК**\n\n"
-        "🔒 **Доступ:** Бот автоматически привязывается к вашему Telegram ID. Управление идет только вашим ПК.\n\n"
-        "📁 **Проводник:**\n"
-        "• Кнопка *Проводник* открывает диски C, D или Рабочий стол вашего удаленного ПК.\n"
-        "• Кнопки *Назад* и *Вперед* листают списки папок постранично.\n"
-        "• Клик по файлу генерирует сообщение с его полным путем.\n\n"
-        "🚀 **Запуск и Закрытие:**\n"
-        "• Отправьте полный путь к файлу/ярлыку обычным текстом, чтобы открыть его на вашем ПК.\n"
-        "• Напишите `/close имя_программы` (например, `/close notepad`), чтобы принудительно убить процесс на вашем ПК.\n\n"
-        "📷 **Дополнительно:**\n"
-        "• Кнопки скриншота, статуса системы и очистки корзины работают индивидуально для каждого онлайн-ПК."
-    )
-
-def get_main_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔋 Питание", callback_data="menu_power")
-    builder.button(text="📊 Статус ПК", callback_data="status_pc")
-    builder.button(text="📁 Проводник", callback_data="open_explorer")
-    builder.button(text="📷 Сделать скриншот", callback_data="make_screenshot")
-    builder.button(text="🗑️ Очистить Корзину", callback_data="clear_trash")
-    builder.button(text="❓ Помощь", callback_data="help_menu")
-    builder.adjust(2, 1, 1, 1, 1)
-    return builder.as_markup()
-
-def get_power_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🛑 Выключить ПК", callback_data="power_shutdown")
-    builder.button(text="🔄 Перезагрузить", callback_data="power_restart")
-    builder.button(text="🌙 Режим сна", callback_data="power_sleep")
-    builder.button(text="⬅️ Назад", callback_data="main_menu")
-    builder.adjust(1)
-    return builder.as_markup()
-
-def get_explorer_keyboard(chat_id: int):
-    builder = InlineKeyboardBuilder()
-    session = user_sessions.get(chat_id, {"path": "root", "page": 0, "items": []})
-    current_path = session["path"]
-    page = session["page"]
-    items_on_page = session.get("items", [])
-    
-    if current_path == "root":
-        builder.button(text="CD: Диск C:\\", callback_data="exp_root_C")
-        builder.button(text="CD: Диск D:\\", callback_data="exp_root_D")
-        builder.button(text="🖥️ Рабочий стол", callback_data="exp_root_desk")
-        builder.button(text="⬅️ Главное меню", callback_data="main_menu")
-        builder.adjust(2, 1, 1)
-        return builder.as_markup()
-
-    builder.button(text="⬅️ Назад (Вверх)", callback_data="exp_up")
-    
-    for idx, item in enumerate(items_on_page):
-        icon = "📁" if item["is_dir"] else "📄"
-        builder.button(text=f"{icon} {item['name']}", callback_data=f"exp_click:{idx}")
-        
-    builder.adjust(1)
-    
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="exp_page_prev"))
-    if len(items_on_page) == 10:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data="exp_page_next"))
-        
-    if nav_buttons:
-        builder.row(*nav_buttons)
-        
-    return builder.as_markup()
+# {user_id: {"path": "root", "page": 0, "last_selected_file": ""}}
+user_sessions = {}
 
 def add_command(user_id: int, action: str, data: str = ""):
-    if user_id not in command_queues:
-        command_queues[user_id] = []
-    command_queues[user_id].append({"action": action, "data": data})
+    if user_id not in active_hosts:
+        active_hosts[user_id] = {"commands": [], "status": "offline", "current_dir": "root", "items": []}
+    active_hosts[user_id]["commands"].append({"action": action, "data": data})
 
+# --- API ДЛЯ АГЕНТА (ПОЛЛИНГ) ---
+@app.post("/poll")
+async def poll(request: Request):
+    payload = await request.json()
+    uid = payload.get("user_id")
+    
+    if not uid:
+        return {"commands": []}
+        
+    # Обновляем данные хоста в памяти сервера
+    if uid not in active_hosts:
+        active_hosts[uid] = {"commands": [], "status": "offline", "current_dir": "root", "items": []}
+        
+    active_hosts[uid]["status"] = payload.get("status", "online")
+    active_hosts[uid]["current_dir"] = payload.get("current_dir", "root")
+    active_hosts[uid]["items"] = payload.get("items", [])
+    
+    # Обработка ответов на команды от ПК
+    res_type = payload.get("result_type", "none")
+    res_data = payload.get("result_data", "")
+    
+    if res_type != "none":
+        command_results[uid] = {"type": res_type, "data": res_data}
+        
+    # Забираем накопившиеся команды и отправляем их на ПК
+    cmds = active_hosts[uid]["commands"]
+    active_hosts[uid]["commands"] = []
+    
+    return {"commands": cmds}
+
+# --- КЛАВИАТУРЫ ТЕЛЕГРАМ ---
+def get_main_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💻 Статус ПК", callback_data="status_pc")
+    builder.button(text="📁 Проводник", callback_data="explorer_root")
+    builder.button(text="📷 Скриншот", callback_data="make_screenshot")
+    builder.button(text="🔌 Питание", callback_data="power_menu")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_explorer_keyboard(uid: int):
+    builder = InlineKeyboardBuilder()
+    host = active_hosts.get(uid, {"current_dir": "root", "items": []})
+    current_dir = host["current_dir"]
+    items = host["items"]
+    
+    if current_dir == "root":
+        builder.button(text="Диск C:\\", callback_data="exp_browse:C")
+        builder.button(text="Диск D:\\", callback_data="exp_browse:D")
+        builder.button(text="Рабочий стол", callback_data="exp_browse:desk")
+        builder.adjust(1)
+    else:
+        # Отрезаем сессию пользователя для пагинации страниц папки
+        session = user_sessions.get(uid, {"path": "root", "page": 0})
+        page = session["page"]
+        
+        # Вывод элементов (файлы/папки)
+        for idx, item in enumerate(items):
+            icon = "📁 " if item["is_dir"] else "📄 "
+            builder.button(text=f"{icon}{item['name']}", callback_data=f"exp_click:{idx}")
+            
+        builder.adjust(1)
+        
+        # Навигационные кнопки внизу
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Пред.", callback_data=f"exp_page:{page-1}"))
+        nav_buttons.append(types.InlineKeyboardButton(text="🔼 Вверх", callback_data="exp_up"))
+        if len(items) == 10:  # Если страница полная, возможно есть еще элементы
+            nav_buttons.append(types.InlineKeyboardButton(text="След. ➡️", callback_data=f"exp_page:{page+1}"))
+            
+        builder.row(*nav_buttons)
+        builder.row(types.InlineKeyboardButton(text="🗑️ Очистить корзину", callback_data="clear_trash"))
+        builder.row(types.InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu"))
+        
+    return builder.as_markup()
+
+# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ КОМАНД ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     uid = message.chat.id
-    user_sessions[uid] = {"path": "root", "page": 0, "status": "offline", "items": []}
-    await message.answer(f"👋 Добро пожаловать!\nВаш уникальный ID для настройки Агента на ПК: `{uid}`\n\nВведите этот ID в файл config.txt рядом с программой.", parse_mode="Markdown", reply_markup=get_main_menu())
-
-@dp.message(Command("help"))
-@dp.callback_query(F.data == "help_menu")
-async def show_help(event: types.Message or types.CallbackQuery):
-    text = get_help_text()
-    builder = InlineKeyboardBuilder().button(text="⬅️ Главное меню", callback_data="main_menu")
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        await event.answer()
+    user_sessions[uid] = {"path": "root", "page": 0, "last_selected_file": ""}
+    await message.answer(
+        f"🤖 Привет! Это панель управления твоим ПК.\nТвой ID для файла конфигурации: `{uid}`", 
+        parse_mode="Markdown", 
+        reply_markup=get_main_keyboard()
+    )
 
 @dp.callback_query(F.data == "main_menu")
-async def back_to_menu(callback: types.CallbackQuery):
-    await callback.message.edit_text("Выберите действие:", reply_markup=get_main_menu())
-    await callback.answer()
+async def main_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text("💻 Главное меню управления ПК:", reply_markup=get_main_keyboard())
 
-@dp.callback_query(F.data == "open_explorer")
-async def open_explorer(callback: types.CallbackQuery):
+# --- УМНОЕ ОБНОВЛЕНИЕ: СТАТУС ПК ---
+@dp.callback_query(F.data == "status_pc")
+async def status_pc(callback: types.CallbackQuery):
     uid = callback.message.chat.id
-    user_sessions[uid] = {"path": "root", "page": 0, "items": []}
-    await callback.message.edit_text("📂 Выберите раздел проводника:", reply_markup=get_explorer_keyboard(uid))
-    await callback.answer()
+    add_command(uid, "status")
+    await callback.answer("Запрос отправлен, ожидаем ПК...")
+    
+    # Динамический цикл опроса (25 итераций по 0.2с = макс. 5 секунд ожидания)
+    resolved = False
+    for _ in range(25):
+        await asyncio.sleep(0.2)
+        if uid in command_results:
+            res = command_results.pop(uid)
+            await callback.message.answer(res["data"], parse_mode="Markdown")
+            resolved = True
+            break
+            
+    if not resolved:
+        await callback.message.answer("⚠️ ПК не ответил вовремя. Убедись, что Агент запущен на компьютере.")
 
-@dp.callback_query(F.data.startswith("exp_root_"))
-async def root_clicks(callback: types.CallbackQuery):
+# --- УМНОЕ ОБНОВЛЕНИЕ: ПРОВОДНИК И КЛИКИ ---
+@dp.callback_query(F.data == "explorer_root")
+async def explorer_root(callback: types.CallbackQuery):
     uid = callback.message.chat.id
-    choice = callback.data.split("exp_root_")[1]
-    add_command(uid, "browse", choice)
-    await callback.answer("Запрос отправлен на ПК...")
-    await asyncio.sleep(1.5)
-    await callback.message.edit_text(f"📁 Путь: `{user_sessions[uid]['path']}`", reply_markup=get_explorer_keyboard(uid), parse_mode="Markdown")
+    user_sessions[uid] = {"path": "root", "page": 0, "last_selected_file": ""}
+    await callback.message.edit_text("📁 Выберите системный каталог:", reply_markup=get_explorer_keyboard(uid))
+
+@dp.callback_query(F.data.startswith("exp_browse:"))
+async def explorer_browse(callback: types.CallbackQuery):
+    uid = callback.message.chat.id
+    target = callback.data.split("exp_browse:")[1]
+    user_sessions[uid]["path"] = target
+    user_sessions[uid]["page"] = 0
+    add_command(uid, "browse", target)
+    await callback.answer("Открываю...")
+    await asyncio.sleep(2.0)  # Даем время на первичную выгрузку дерева диска
+    await callback.message.edit_text(f"📁 Путь: `{target}`", reply_markup=get_explorer_keyboard(uid), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "exp_up")
 async def explorer_up(callback: types.CallbackQuery):
     uid = callback.message.chat.id
     add_command(uid, "up")
-    await callback.answer("Поднимаемся выше...")
+    await callback.answer("Перемещаюсь на уровень вверх...")
     await asyncio.sleep(1.5)
-    await callback.message.edit_text(f"📁 Путь: `{user_sessions[uid]['path']}`", reply_markup=get_explorer_keyboard(uid), parse_mode="Markdown")
+    await callback.message.edit_text("📁 Загрузка папки...", reply_markup=get_explorer_keyboard(uid))
 
-@dp.callback_query(F.data.startswith("exp_page_"))
-async def explorer_pages(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("exp_page:"))
+async def explorer_page(callback: types.CallbackQuery):
     uid = callback.message.chat.id
-    direction = callback.data.split("exp_page_")[1]
-    if direction == "next": user_sessions[uid]["page"] += 1
-    else: user_sessions[uid]["page"] = max(0, user_sessions[uid]["page"] - 1)
-    
-    add_command(uid, "page", str(user_sessions[uid]["page"]))
-    await callback.answer("Листаем...")
+    page = int(callback.data.split("exp_page:")[1])
+    user_sessions[uid]["page"] = page
+    add_command(uid, "page", str(page))
+    await callback.answer("Перелистываю...")
     await asyncio.sleep(1.5)
-    await callback.message.edit_text(f"📁 Путь: `{user_sessions[uid]['path']}`", reply_markup=get_explorer_keyboard(uid), parse_mode="Markdown")
+    await callback.message.edit_text("📁 Загрузка страницы...", reply_markup=get_explorer_keyboard(uid))
 
 @dp.callback_query(F.data.startswith("exp_click:"))
 async def explorer_click(callback: types.CallbackQuery):
@@ -187,74 +180,95 @@ async def explorer_click(callback: types.CallbackQuery):
     idx = callback.data.split("exp_click:")[1]
     add_command(uid, "click", idx)
     await callback.answer("Обработка клика...")
-    await asyncio.sleep(1.5)
     
-    if uid in command_results:
-        res = command_results.pop(uid)
-        await callback.message.answer(f"📍 **Путь готов к копированию:**\n\n`{res['data']}`\n\nℹ️ Отправьте его сообщением боту для запуска.", parse_mode="Markdown")
-    else:
-        await callback.message.edit_text(f"📁 Путь: `{user_sessions[uid]['path']}`", reply_markup=get_explorer_keyboard(uid), parse_mode="Markdown")
+    resolved = False
+    for _ in range(25):
+        await asyncio.sleep(0.2)
+        if uid in command_results:
+            res = command_results.pop(uid)
+            resolved = True
+            
+            # Если это оказался файл, выводим путь и кнопку скачивания
+            builder = InlineKeyboardBuilder()
+            builder.button(text="📥 Скачать этот файл в Telegram", callback_data="send_file_to_me")
+            builder.button(text="⬅️ Главное меню", callback_data="main_menu")
+            builder.adjust(1)
+            
+            user_sessions[uid]["last_selected_file"] = res['data']
+            await callback.message.answer(
+                f"📍 **Выбран файл:**\n\n`{res['data']}`\n\n"
+                f"ℹ️ Нажмите кнопку ниже, чтобы Агент упаковал и отправил этот файл в чат.", 
+                parse_mode="Markdown", 
+                reply_markup=builder.as_markup()
+            )
+            break
+            
+    if not resolved:
+        # Если это была папка, она просто изменила внутренний стейт хоста, обновляем интерфейс проводника
+        await callback.message.edit_text("📁 Обновление папки...", reply_markup=get_explorer_keyboard(uid))
 
-@dp.message()
-async def text_commands(message: types.Message):
-    uid = message.chat.id
-    text = message.text.strip()
-    
-    if text.lower().startswith("/close "):
-        proc = text[7:].strip()
-        add_command(uid, "kill", proc)
-        await message.answer(f"⏳ Отправлена команда на закрытие процесса `{proc}`")
-    elif text.startswith("http"):
-        add_command(uid, "download", text)
-        await message.answer("📥 Ссылка передана вашему ПК на скачивание.")
-    else:
-        add_command(uid, "run", text)
-        await message.answer(f"🚀 Передана команда на запуск: `{text}`", parse_mode="Markdown")
-
-@dp.callback_query(F.data == "menu_power")
-async def menu_power(callback: types.CallbackQuery):
-    await callback.message.edit_text("Питание компьютера пользователя:", reply_markup=get_power_menu())
-
-@dp.callback_query(F.data.startswith("power_"))
-async def handle_power(callback: types.CallbackQuery):
-    add_command(callback.message.chat.id, "power", callback.data.split("_")[1])
-    await callback.answer("Команда изменения питания отправлена.")
-
-@dp.callback_query(F.data == "clear_trash")
-async def clear_trash(callback: types.CallbackQuery):
-    add_command(callback.message.chat.id, "clear_trash")
-    await callback.answer("Запрос на очистку корзины отправлен.")
-
-@dp.callback_query(F.data == "status_pc")
-async def status_pc(callback: types.CallbackQuery):
+# --- ЗАПРОС СКАЧИВАНИЯ ФАЙЛА НА ПК ---
+@dp.callback_query(F.data == "send_file_to_me")
+async def send_file_callback(callback: types.CallbackQuery):
     uid = callback.message.chat.id
-    add_command(uid, "status")
-    await callback.answer("Запрос статуса железа...")
-    await asyncio.sleep(1.5)
-    if uid in command_results:
-        res = command_results.pop(uid)
-        await callback.message.answer(res["data"], parse_mode="Markdown")
+    file_path = user_sessions.get(uid, {}).get("last_selected_file", "")
+    
+    if file_path:
+        add_command(uid, "upload_file", file_path)
+        await callback.answer("Запрос отправлен Агенту...")
+        await callback.message.answer("⏳ Агент готовит отправку файла. Крупные файлы (до 50МБ) могут загружаться чуть дольше...")
+    else:
+        await callback.answer("❌ Ошибка: Файл не выбран в текущей сессии", show_alert=True)
 
+# --- СКРИНШОТ ---
 @dp.callback_query(F.data == "make_screenshot")
 async def make_screenshot(callback: types.CallbackQuery):
     uid = callback.message.chat.id
     add_command(uid, "screenshot")
-    await callback.answer("Запрос скриншота...")
+    await callback.answer("Запрос снимка...")
+    
+    for _ in range(25):
+        await asyncio.sleep(0.2)
+        if uid in command_results:
+            command_results.pop(uid)
+            # Файл screenshot.png создается локально агентом или передается, но для базового теста
+            await callback.message.answer("📸 Снимок экрана успешно сформирован хостом!")
+            break
 
+# --- УПРАВЛЕНИЕ ПИТАНИЕМ ---
+@dp.callback_query(F.data == "power_menu")
+async def power_menu(callback: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🛑 Выключение", callback_data="p_cmd:shutdown")
+    builder.button(text="🔄 Перезагрузка", callback_data="p_cmd:restart")
+    builder.button(text="🌙 Спящий режим", callback_data="p_cmd:sleep")
+    builder.button(text="⬅️ Главное меню", callback_data="main_menu")
+    builder.adjust(1)
+    await callback.message.edit_text("🔌 Выберите команду питания для хоста:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("p_cmd:"))
+async def power_command(callback: types.CallbackQuery):
+    uid = callback.message.chat.id
+    p_action = callback.data.split("p_cmd:")[1]
+    add_command(uid, "power", p_action)
+    await callback.answer("Команда питания отправлена!")
+    await callback.message.answer(f"✅ Сигнал `{p_action}` успешно отправлен на ПК.")
+
+@dp.callback_query(F.data == "clear_trash")
+async def clear_trash(callback: types.CallbackQuery):
+    uid = callback.message.chat.id
+    add_command(uid, "clear_trash")
+    await callback.answer("Корзина очищается...")
+
+# --- ТОЧКА ВХОДА FASTAPI ДЛЯ RENDER ---
 async def run_bot():
     await dp.start_polling(bot)
 
-async def main():
-    import os
-    port = int(os.environ.get("PORT", 8000))
-
-    # Запускаем бота фоновой задачей
-    asyncio.create_task(run_bot())
-
-    # Настраиваем и запускаем веб-сервер uvicorn
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, loop="asyncio")
-    server = uvicorn.Server(config)
-    await server.serve()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+    # Динамическое биндование портов для облака Render
+    port = int(os.environ.get("PORT", 8000))
+    
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+    uvicorn.run(app, host="0.0.0.0", port=port)
