@@ -215,3 +215,13 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+# --- СИНХРОНИЗАЦИЯ БУФЕРА ОБМЕНА ИЗ ТЕЛЕФОНА НА ПК ---
+@dp.message(F.text & ~F.text.startswith("/") & ~F.text.startswith("kill:") & ~F.text.startswith("del:"))
+async def handle_text_for_clipboard(message: types.Message):
+    uid = message.chat.id
+    hid = get_user_host(uid)
+    
+    # Отправляем текст сообщения как команду обновления буфера обмена на ПК
+    add_command(hid, "update_clipboard", message.text)
+    await message.answer(f"📋 Текст отправлен в буфер обмена устройства `{hid}`!")
