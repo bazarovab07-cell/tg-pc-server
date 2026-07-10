@@ -100,24 +100,33 @@ async def poll(request: Request):
     
     # === НАЧАЛО БЛОКА АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЙ НА 5 СЕКУНД ===
     report = payload.get("report", "")
-    if report and last_msg_id:
+    if report:  # Убрали обязательное требование last_msg_id, чтобы не блокировать отправку
         async def send_and_delete_report(chat_id, report_text):
             try:
-                if report_text.startswith("SUCCESS:"):
-                    msg = report_text.replace("SUCCESS:", "")
+                status_msg = None
+                # Приводим к строке и очищаем от пробелов, чтобы избежать ошибок формата
+                text_str = str(report_text).strip()
+                
+                if text_str.startswith("SUCCESS:"):
+                    msg = text_str.replace("SUCCESS:", "").strip()
                     status_msg = await bot.send_message(chat_id=chat_id, text=f"✅ **Успешно:** {msg}", parse_mode="Markdown")
-                elif report_text.startswith("ERROR:"):
-                    msg = report_text.replace("ERROR:", "")
+                elif text_str.startswith("ERROR:"):
+                    msg = text_str.replace("ERROR:", "").strip()
                     status_msg = await bot.send_message(chat_id=chat_id, text=f"❌ **Ошибка:** {msg}", parse_mode="Markdown")
                 
-                # Задержка перед уничтожением
-                await asyncio.sleep(5)
-                await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except Exception:
-                pass
+                if status_msg:
+                    # Ждем ровно 5 секунд
+                    await asyncio.sleep(5)
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                        logging.info(f"Сообщение {status_msg.message_id} успешно удалено через 5 сек.")
+                    except Exception as del_err:
+                        logging.error(f"Не удалось удалить сообщение: {del_err}")
+            except Exception as e:
+                logging.error(f"Ошибка в таске автоудаления: {e}")
 
-        # Уводим таску в фон, чтобы моментально разгрузить poll-запрос
-        asyncio.create_task(send_and_delete_report(uid, report))
+        # Запускаем фоновую задачу
+        asyncio.create_task(send_and_delete_report(int(uid), report))
     # === КОНЕЦ БЛОКА АВТОУДАЛЕНИЯ ===
 
     # Обработка специфических тяжелых данных от агента (Список процессов)
