@@ -62,24 +62,19 @@ async def poll(request: Request):
     status_data = payload.get("status", "online")
     if status_data.startswith("PROCESSES_LIST:"):
         raw_procs = status_data.replace("PROCESSES_LIST:\n", "").strip()
-        
         builder = InlineKeyboardBuilder()
-        # Каждая строка — это "имя.exe|память"
         lines = raw_procs.split("\n") if raw_procs else []
         
         text_msg = "📋 **Активные процессы на ПК:**\n Нажми кнопку под сообщением, чтобы убить нужный процесс.\n\n"
-        
         for idx, line in enumerate(lines):
             if "|" in line:
                 name, mem = line.split("|")
                 text_msg += f"{idx+1}. 🔹 `{name}` ({mem})\n"
-                # Добавляем инлайн-кнопку для завершения (обрезаем если слишком длинное имя)
                 builder.button(text=f"❌ {name}", callback_data=f"kill_proc:{name}")
         
         builder.button(text="🔄 Обновить список", callback_data="get_proc_list")
         builder.button(text="📱 Главное меню", callback_data="main_menu")
-        builder.adjust(2) # Кнопки процессов будут идти по 2 в ряд
-        
+        builder.adjust(2)
         await bot.send_message(chat_id=uid, text=text_msg, parse_mode="Markdown", reply_markup=builder.as_markup())
         
     elif status_data.startswith("CLIPBOARD_FROM_PC:"):
@@ -98,8 +93,7 @@ async def upload_screenshot(request: Request, host_id: str, user_id: int):
         tg_file = BufferedInputFile(file_bytes, filename="stream.jpg")
         await bot.send_photo(chat_id=int(user_id), photo=tg_file, caption=f"📸 Скриншот экрана ПК [{host_id}] ✅")
         return {"status": "success"}
-    except Exception as e:
-        return {"status": "error", "details": str(e)}
+    except Exception as e: return {"status": "error", "details": str(e)}
 
 def get_user_host(uid: int) -> str:
     return str(user_sessions.get(uid, {}).get("current_host", f"host_{uid}")).strip().lower()
@@ -118,7 +112,23 @@ def get_main_keyboard():
 async def cmd_start(message: types.Message):
     uid = message.chat.id
     user_sessions[uid] = {"current_host": f"host_{uid}"}
-    await message.answer(f"🤖 Управление ПК готово.\nТекущий хост: `{get_user_host(uid)}`", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    
+    # Твой ID, который нужно будет ввести на ПК
+    your_id = message.from_user.id
+    
+    builder = InlineKeyboardBuilder()
+    # Замени на реальную ссылку, куда загрузишь ехе (Яндекс.Диск, GitHub, Google Диск или прямая ссылка)
+    builder.button(text="📥 Скачать Агента (.exe)", url="https://github.com/твой_профиль/твой_репозиторий/releases/download/v1.0/agent.exe")
+    builder.button(text="🖥 Открыть панель управления", callback_data="main_menu")
+    builder.adjust(1)
+    
+    welcome_text = (
+        f"🤖 **Привет! Добро пожаловать в панель управления ПК.**\n\n"
+        f"Твой уникальный Telegram ID: `{your_id}`\n"
+        f"Скопируй его и введи в окне программы на компьютере при первом запуске.\n\n"
+        f"Скачай актуальную версию агента по кнопке ниже:"
+    )
+    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu(callback: types.CallbackQuery):
@@ -139,7 +149,6 @@ async def get_proc_list(callback: types.CallbackQuery):
     add_command(get_user_host(callback.message.chat.id), "list_dir_or_proc", "processes")
     await callback.answer("Запрос списка процессов отправлен.")
 
-# Обработка клика по кнопке процесса
 @dp.callback_query(F.data.startswith("kill_proc:"))
 async def kill_proc_handler(callback: types.CallbackQuery):
     proc_name = callback.data.split("kill_proc:")[1]
@@ -156,16 +165,13 @@ async def explorer_view(callback: types.CallbackQuery):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад (Вверх)", callback_data="cd_back")
-    
     for item in items[:15]:
         name = item.get("name")
         icon = "📁" if item.get("is_dir") else "📄"
         builder.button(text=f"{icon} {name}", callback_data=f"click_item:{name}")
-        
     builder.button(text="🔄 Обновить папку", callback_data="refresh_dir")
     builder.button(text="📱 Главное меню", callback_data="main_menu")
     builder.adjust(1)
-    
     await callback.message.edit_text(f"📁 **Текущий путь:** `{current_dir}`\nПоказано первых 15 элементов:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "refresh_dir")
