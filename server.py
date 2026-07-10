@@ -262,13 +262,25 @@ async def clear_trash(callback: types.CallbackQuery):
 
 # --- ТОЧКА ВХОДА FASTAPI ДЛЯ RENDER ---
 async def run_bot():
+    # Очищаем старые зависшие нажатия кнопок перед стартом
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
+    
 if __name__ == "__main__":
     import uvicorn
-    # Динамическое биндование портов для облака Render
+    import asyncio
+    
+    # Получаем порт от Render
     port = int(os.environ.get("PORT", 8000))
     
-    loop = asyncio.get_event_loop()
+    # Корректный запуск фоновой задачи для бота в текущем цикле событий
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
     loop.create_task(run_bot())
+    
+    # Запускаем веб-сервер, который будет отвечать Render и пингаторам
     uvicorn.run(app, host="0.0.0.0", port=port)
