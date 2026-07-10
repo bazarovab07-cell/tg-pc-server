@@ -244,11 +244,17 @@ async def make_screenshot(callback: types.CallbackQuery):
 async def run_bot():
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+async def main():
     import os
-    # Динамический порт для Render
     port = int(os.environ.get("PORT", 8000))
-    
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    # Запускаем бота фоновой задачей
+    asyncio.create_task(run_bot())
+
+    # Настраиваем и запускаем веб-сервер uvicorn
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, loop="asyncio")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+if __name__ == "__main__":
+    asyncio.run(main())
