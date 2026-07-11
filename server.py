@@ -44,7 +44,6 @@ def send_tg_document(chat_id, file_name, file_base64, caption=""):
         file_data = base64.b64decode(file_base64)
         boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
         
-        # Формируем multipart/form-data вручную
         body = []
         body.append(f'--{boundary}'.encode('utf-8'))
         body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
@@ -355,7 +354,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
         await callback.answer("Команда отправлена!", show_alert=True)
 
-@dp.message(AwaitingCMD())
+@dp.message()
 async def handle_text_messages(message: types.Message):
     uid = message.from_user.id
     session = user_sessions.get(uid, {})
