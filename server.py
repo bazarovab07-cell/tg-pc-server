@@ -1,137 +1,48 @@
 import os
+import asyncio
 import logging
 import base64
-import json
-import urllib.request
-import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters import Command
 
-# Настройка подробного логирования
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Твой рабочий токен
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
-# Автоматически подтягиваем домен от Render
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-
-if not RENDER_URL:
-    RENDER_URL = "https://tg-pc-server.onrender.com"
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://YOUR_DOMAIN.onrender.com")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Глобальные хранилища данных
 active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
-last_processed_reports = {}  # host_id -> last_report_text
+last_processed_reports = {}  # host_id -> last_report_text (Защита от дублирования сообщений)
 
-# --- ПРЯМАЯ ОТПРАВКА СООБЩЕНИЙ ЧЕРЕЗ URLLIB ---
-def send_tg_message(chat_id, text, parse_mode="Markdown"):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            response.read()
-    except Exception as e:
-        logging.error(f"Ошибка прямой отправки сообщения: {e}")
+# Модель данных для эндпоинта авторизации (из Tkinter окна)
+class AuthRequest(BaseModel):
+    host_id: str
+    tg_id: str
+    code: str
 
-def send_tg_document(chat_id, file_name, file_base64, caption=""):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
-    try:
-        file_data = base64.b64decode(file_base64)
-        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-        body = []
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(str(chat_id).encode('utf-8'))
-        
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="caption"'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(caption.encode('utf-8'))
-        
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="document"; filename="{file_name}"'.encode('utf-8'))
-        body.append('Content-Type: application/octet-stream'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(file_data)
-        
-        body.append(f'--{boundary}--'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        
-        payload = b'\r\n'.join(body)
-        headers = {
-            'Content-Type': f'multipart/form-data; boundary={boundary}',
-            'Content-Length': str(len(payload))
-        }
-        req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=20) as response:
-            response.read()
-    except Exception as e:
-        logging.error(f"Ошибка прямой отправки файла: {e}")
-
-def send_tg_photo(chat_id, photo_base64, caption=""):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    try:
-        photo_data = base64.b64decode(photo_base64)
-        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-        body = []
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(str(chat_id).encode('utf-8'))
-        
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="caption"'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(caption.encode('utf-8'))
-        
-        body.append(f'--{boundary}'.encode('utf-8'))
-        body.append(f'Content-Disposition: form-data; name="photo"; filename="screenshot.png"'.encode('utf-8'))
-        body.append('Content-Type: image/png'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        body.append(photo_data)
-        
-        body.append(f'--{boundary}--'.encode('utf-8'))
-        body.append(''.encode('utf-8'))
-        
-        payload = b'\r\n'.join(body)
-        headers = {
-            'Content-Type': f'multipart/form-data; boundary={boundary}',
-            'Content-Length': str(len(payload))
-        }
-        req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=20) as response:
-            response.read()
-    except Exception as e:
-        logging.error(f"Ошибка прямой отправки фото: {e}")
-
-
-# --- УПРАВЛЕНИЕ ВЕБХУКОМ ПРИ СТАРТЕ ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    base_url = RENDER_URL.rstrip("/")
-    webhook_url = f"{base_url}/webhook"
-    logging.info(f"--- РЕГИСТРАЦИЯ ВЕБХУКА TG -> {webhook_url} ---")
-    try:
-        # Устанавливаем вебхук и чистим старые сообщения
-        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    except Exception as e:
-        logging.error(f"Ошибка установки вебхука: {e}")
+    webhook_url = f"{RENDER_URL}/webhook"
+    logging.info(f"Установка вебхука: {webhook_url}")
+    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     yield
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
-    await bot.session.close()
+    logging.info("Удаление вебхука...")
+    await bot.delete_webhook()
 
 app = FastAPI(lifespan=lifespan)
 
+# Генерирует файловый менеджер в виде инлайн-кнопок
 def get_file_manager_keyboard(items, current_dir):
     keyboard = []
     keyboard.append([InlineKeyboardButton(text="📁 .. (Вверх)", callback_data="cd_..")])
@@ -139,6 +50,7 @@ def get_file_manager_keyboard(items, current_dir):
     folders = [x for x in items if x.get("type") == "folder"]
     files = [x for x in items if x.get("type") == "file"]
     
+    # Ограничиваем до 30, чтобы не упереться в лимиты Telegram по кнопкам
     for folder in folders[:30]:
         name = folder.get("name", "")
         keyboard.append([InlineKeyboardButton(text=f"📁 {name}", callback_data=f"cd_{name}")])
@@ -162,7 +74,33 @@ def get_file_manager_keyboard(items, current_dir):
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# --- ПРИЕМ ЗАПРОСОВ ОТ АГЕНТА С ПК ---
+# === НОВЫЙ ЭНДПОИНТ АВТОРИЗАЦИИ (ДЛЯ ОКНА AGENT.PY) ===
+@app.post("/auth")
+async def auth_endpoint(data: AuthRequest):
+    try:
+        uid = int(data.tg_id)
+        host_id = data.host_id
+        
+        # Принудительно регистрируем/линкуем хост за пользователем
+        if host_id not in active_hosts:
+            active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
+        
+        if uid not in user_sessions:
+            user_sessions[uid] = {}
+        user_sessions[uid]["current_host"] = host_id
+        
+        # Отправляем подтверждение в Telegram
+        await bot.send_message(
+            chat_id=uid, 
+            text=f"🟢 *Устройство успешно авторизовано!*\n💻 Хост: `{host_id}`\n\nОтправь /start, чтобы открыть панель управления.", 
+            parse_mode="Markdown"
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logging.error(f"Ошибка в /auth: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# Эндпоинт связи с агентом на ПК (Poll)
 @app.post("/poll")
 async def poll(request: Request):
     try:
@@ -171,16 +109,14 @@ async def poll(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
         
     host_id = payload.get("host_id")
-    uid_raw = payload.get("uid")
+    uid = payload.get("uid")
     
-    if not host_id or not uid_raw: 
+    if not host_id or not uid: 
         return {"commands": [], "clear_report": False}
+        
+    uid = int(uid)
     
-    try:
-        uid = int(uid_raw)
-    except ValueError:
-        return {"commands": [], "clear_report": False}
-    
+    # Регистрация или обновление хоста в сети
     if host_id not in active_hosts:
         active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
     
@@ -193,39 +129,67 @@ async def poll(request: Request):
     
     last_msg_id = user_sessions[uid].get("last_msg_id")
     
+    # === БЛОК АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЙ ===
     report = payload.get("report", "")
     should_clear_report = False
     
     if report:
         text_str = str(report).strip()
-        if text_str != last_processed_reports.get(host_id, ""):
-            last_processed_reports[host_id] = text_str  
-            should_clear_report = True                  
+        last_report = last_processed_reports.get(host_id, "")
+        
+        if text_str != last_report:
+            last_processed_reports[host_id] = text_str  # Запоминаем текущий репорт
+            should_clear_report = True                  # Даем агенту команду стереть статус
             
-            if text_str.startswith("SUCCESS:"):
-                msg = text_str.replace("SUCCESS:", "").strip()
-                send_tg_message(uid, f"✅ **Успешно:** {msg}")
-            elif text_str.startswith("ERROR:"):
-                msg = text_str.replace("ERROR:", "").strip()
-                send_tg_message(uid, f"❌ **Ошибка:** {msg}")
+            async def send_and_delete_report(chat_id, report_text):
+                try:
+                    status_msg = None
+                    if report_text.startswith("SUCCESS:"):
+                        msg = report_text.replace("SUCCESS:", "").strip()
+                        status_msg = await bot.send_message(chat_id=chat_id, text=f"✅ **Успешно:** {msg}", parse_mode="Markdown")
+                    elif report_text.startswith("ERROR:"):
+                        msg = report_text.replace("ERROR:", "").strip()
+                        status_msg = await bot.send_message(chat_id=chat_id, text=f"❌ **Ошибка:** {msg}", parse_mode="Markdown")
+                    
+                    if status_msg:
+                        await asyncio.sleep(5)
+                        try:
+                            await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logging.error(f"Ошибка удаления: {e}")
+
+            asyncio.create_task(send_and_delete_report(uid, text_str))
         else:
             should_clear_report = True
+    # === КОНЕЦ БЛОКА АВТОУДАЛЕНИЯ ===
 
+    # Обработка процессов
     if "processes" in payload:
         proc_list = payload.get("processes", [])
         text = "📊 **Список активных процессов:**\n\n" + "\n".join([f"🔹 `{p}`" for p in proc_list[:40]])
-        send_tg_message(uid, text)
+        await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
         
+    # Обработка буфера обмена ПК
     if "clipboard" in payload:
         clip_text = payload.get("clipboard", "")
-        send_tg_message(uid, f"📋 **Буфер обмена ПК:**\n`{clip_text}`")
+        await bot.send_message(chat_id=uid, text=f"📋 **Буфер обмена ПК:**\n`{clip_text}`", parse_mode="Markdown")
 
+    # Прием файлов
     if "file_data" in payload and "file_name" in payload:
-        send_tg_document(uid, payload.get("file_name"), payload.get("file_data"), f"📥 Файл скачан: `{payload.get('file_name')}`")
+        file_name = payload.get("file_name")
+        raw_data = base64.b64decode(payload.get("file_data"))
+        input_file = BufferedInputFile(raw_data, filename=file_name)
+        await bot.send_document(chat_id=uid, document=input_file, caption=f"📥 Файл скачан: `{file_name}`", parse_mode="Markdown")
 
+    # Прием скриншота
     if "screenshot_data" in payload:
-        send_tg_photo(uid, payload.get("screenshot_data"), "📸 Скриншот экрана ПК")
+        raw_data = base64.b64decode(payload.get("screenshot_data"))
+        input_file = BufferedInputFile(raw_data, filename="screenshot.png")
+        await bot.send_photo(chat_id=uid, photo=input_file, caption="📸 Скриншот экрана ПК")
 
+    # Обновляем основную панель интерфейса
     if "items" in payload or "current_dir" in payload:
         if last_msg_id:
             try:
@@ -240,27 +204,13 @@ async def poll(request: Request):
             except Exception:
                 pass
 
+    # Забираем накопившиеся команды
     commands = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     
     return {"commands": commands, "clear_report": should_clear_report}
 
-
-# --- ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ОТ TELEGRAM ЧЕРЕЗ ВЕБХУК ---
-@app.post("/webhook")
-async def webhook_endpoint(request: Request):
-    try:
-        json_data = await request.json()
-        update = types.Update.model_validate(json_data, context={"bot": bot})
-        await dp.feed_update(bot, update)
-        return {"status": "ok"}
-    except Exception as e:
-        logging.error(f"Ошибка внутри вебхука: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# --- БЛОК ХЭНДЛЕРОВ AIOGRAM ---
-
+# Хэндлер на команду /start
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     uid = message.from_user.id
@@ -276,30 +226,48 @@ async def start_cmd(message: types.Message):
         user_sessions[uid]["current_host"] = target_host
         kb = get_file_manager_keyboard(active_hosts[target_host]["items"], active_hosts[target_host]["current_dir"])
         msg = await message.answer(
-            text=f"💻 **Хост найден в сети:** `{target_host}`\n📁 **Путь:** `{active_hosts[target_host]['current_dir']}`",
+            text=f"💻 **Хост:** `{target_host}`\n📁 **Текущий путь:** `{active_hosts[target_host]['current_dir']}`",
             reply_markup=kb,
             parse_mode="Markdown"
         )
         user_sessions[uid]["last_msg_id"] = msg.message_id
     else:
-        await message.answer("👋 Привет! Твой ПК пока оффлайн. Запусти скрипт-агент на компьютере.")
+        await message.answer("👋 Ожидаю подключения твоего PC-агента... Запусти .exe на целевом ПК.")
 
+# Хэндлер для отправки консольных команд
+@dp.message()
+async def handle_text_messages(message: types.Message):
+    uid = message.from_user.id
+    host_id = user_sessions.get(uid, {}).get("current_host")
+    state = user_sessions.get(uid, {}).get("state")
+    
+    if not host_id or host_id not in active_hosts:
+        await message.answer("❌ Нет активного подключения к ПК. Запусти агент.")
+        return
+
+    if state == "awaiting_cmd":
+        active_hosts[host_id]["commands"].append({"type": "cmd_exec", "param": message.text})
+        user_sessions[uid]["state"] = None
+        await message.answer(f"⏳ Команда `{message.text}` отправлена на исполнение...")
+        return
+
+# Обработчик нажатий на инлайн-кнопки
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    session = user_sessions.get(uid, {})
-    host_id = session.get("current_host")
+    host_id = user_sessions.get(uid, {}).get("current_host")
     
     if not host_id or host_id not in active_hosts:
-        await callback.answer("❌ Активный ПК не найден.", show_alert=True)
+        await callback.answer("❌ Активный ПК не найден или оффлайн.", show_alert=True)
         return
 
     data = callback.data
     user_sessions[uid]["last_msg_id"] = callback.message.message_id
 
     if data.startswith("cd_"):
-        active_hosts[host_id]["commands"].append({"type": "cd", "param": data.replace("cd_", "")})
-        await callback.answer()
+        folder_name = data.replace("cd_", "")
+        active_hosts[host_id]["commands"].append({"type": "cd", "param": folder_name})
+        await callback.answer("Запрос на смену папки...")
         
     elif data.startswith("file_"):
         file_name = data.replace("file_", "")
@@ -323,16 +291,19 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
 
     elif data.startswith("run_"):
-        active_hosts[host_id]["commands"].append({"type": "run_file", "param": data.replace("run_", "")})
-        await callback.answer("Запуск...")
+        f_name = data.replace("run_", "")
+        active_hosts[host_id]["commands"].append({"type": "run_file", "param": f_name})
+        await callback.answer("Запрос на запуск отправлен...")
         
     elif data.startswith("download_"):
-        active_hosts[host_id]["commands"].append({"type": "download_file", "param": data.replace("download_", "")})
-        await callback.answer("Скачивание...")
+        f_name = data.replace("download_", "")
+        active_hosts[host_id]["commands"].append({"type": "download_file", "param": f_name})
+        await callback.answer("Скачиваю файл...")
 
     elif data.startswith("delete_"):
-        active_hosts[host_id]["commands"].append({"type": "delete_file", "param": data.replace("delete_", "")})
-        await callback.answer("Удаление...")
+        f_name = data.replace("delete_", "")
+        active_hosts[host_id]["commands"].append({"type": "delete_file", "param": f_name})
+        await callback.answer("Удаляю файл...")
 
     elif data == "back_to_manager":
         kb = get_file_manager_keyboard(active_hosts[host_id]["items"], active_hosts[host_id]["current_dir"])
@@ -347,37 +318,32 @@ async def handle_callbacks(callback: types.CallbackQuery):
         
     elif data == "show_processes":
         active_hosts[host_id]["commands"].append({"type": "get_processes"})
-        await callback.answer("Запрос процессов...")
+        await callback.answer("Запрашиваю список процессов...")
         
     elif data == "get_clipboard":
         active_hosts[host_id]["commands"].append({"type": "get_clipboard"})
-        await callback.answer("Чтение буфера...")
+        await callback.answer("Читаю буфер обмена...")
 
     elif data == "take_screenshot":
         active_hosts[host_id]["commands"].append({"type": "screenshot"})
-        await callback.answer("Снимок экрана...")
+        await callback.answer("Делаю снимок экрана...")
 
     elif data == "run_cmd":
         user_sessions[uid]["state"] = "awaiting_cmd"
-        await bot.send_message(chat_id=uid, text="⌨️ Введите консольную команду (CMD):")
+        await bot.send_message(chat_id=uid, text="⌨️ Введите консольную команду (CMD), которую нужно выполнить на ПК:")
         await callback.answer()
 
     elif data == "pc_shutdown":
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
-        await callback.answer("Команда отправлена!", show_alert=True)
+        await callback.answer("Команда на выключение ПК отправлена!", show_alert=True)
 
-@dp.message()
-async def handle_text_messages(message: types.Message):
-    uid = message.from_user.id
-    session = user_sessions.get(uid, {})
-    host_id = session.get("current_host")
-    state = session.get("state")
-    
-    if state == "awaiting_cmd" and host_id in active_hosts:
-        active_hosts[host_id]["commands"].append({"type": "cmd_exec", "param": message.text})
-        user_sessions[uid]["state"] = None
-        await message.answer(f"⏳ Команда `{message.text}` отправлена...")
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("server:app", host="0.0.0.0", port=port)
+# Роут для вебхука Telegram
+@app.post("/webhook")
+async def webhook_endpoint(request: Request):
+    try:
+        update = types.Update.model_validate(await request.json(), context={"bot": bot})
+        await dp.feed_update(bot, update)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error(f"Ошибка вебхука: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
