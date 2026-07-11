@@ -4,8 +4,6 @@ import base64
 import json
 import urllib.request
 import uvicorn
-import asyncio
-import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -17,6 +15,11 @@ from aiogram.filters import Command
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
+# Автоматически подтягиваем домен от Render
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
+if not RENDER_URL:
+    RENDER_URL = "https://tg-pc-server.onrender.com"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -25,7 +28,7 @@ active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
 last_processed_reports = {}  # host_id -> last_report_text
 
-# --- ПРЯМАЯ ОТПРАВКА СООБЩЕНИЙ ---
+# --- ПРЯМАЯ ОТПРАВКА СООБЩЕНИЙ ЧЕРЕЗ URLLIB ---
 def send_tg_message(chat_id, text, parse_mode="Markdown"):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode('utf-8')
@@ -108,24 +111,24 @@ def send_tg_photo(chat_id, photo_base64, caption=""):
     except Exception as e:
         logging.error(f"Ошибка прямой отправки фото: {e}")
 
-# --- ФОНОВЫЙ ЗАПУСК БОТА ЧЕРЕЗ LONG POLLING ---
-def run_bot_polling():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Сначала полностью удаляем вебхук, чтобы включить обычный опрос
-    loop.run_until_complete(bot.delete_webhook(drop_pending_updates=True))
-    logging.info("--- ВЕБХУК УДАЛЕН. БОТ ЗАПУЩЕН В РЕЖИМЕ LONG POLLING ---")
-    
-    # Запускаем бесконечный опрос
-    loop.run_until_complete(dp.start_polling(bot))
 
+# --- УПРАВЛЕНИЕ ВЕБХУКОМ ПРИ СТАРТЕ ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускаем aiogram в отдельном потоке, чтобы он не блокировал FastAPI
-    polling_thread = threading.Thread(target=run_bot_polling, daemon=True)
-    polling_thread.start()
+    base_url = RENDER_URL.rstrip("/")
+    webhook_url = f"{base_url}/webhook"
+    logging.info(f"--- РЕГИСТРАЦИЯ ВЕБХУКА TG -> {webhook_url} ---")
+    try:
+        # Устанавливаем вебхук и чистим старые сообщения
+        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    except Exception as e:
+        logging.error(f"Ошибка установки вебхука: {e}")
     yield
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        pass
+    await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -159,6 +162,7 @@ def get_file_manager_keyboard(items, current_dir):
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# --- ПРИЕМ ЗАПРОСОВ ОТ АГЕНТА С ПК ---
 @app.post("/poll")
 async def poll(request: Request):
     try:
@@ -240,6 +244,19 @@ async def poll(request: Request):
     active_hosts[host_id]["commands"] = [] 
     
     return {"commands": commands, "clear_report": should_clear_report}
+
+
+# --- ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ОТ TELEGRAM ЧЕРЕЗ ВЕБХУК ---
+@app.post("/webhook")
+async def webhook_endpoint(request: Request):
+    try:
+        json_data = await request.json()
+        update = types.Update.model_validate(json_data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error(f"Ошибка внутри вебхука: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- БЛОК ХЭНДЛЕРОВ AIOGRAM ---
