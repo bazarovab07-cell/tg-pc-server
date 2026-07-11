@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 import base64
-import uvicorn  # Добавили импорт uvicorn для правильного старта
+import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,12 +10,16 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters import Command
 
-# Настройка логирования
+# Настройка подробного логирования
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
-# Рендер автоматически выдает этот URL. Если тестируешь локально, используй ngrok
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://YOUR_DOMAIN.onrender.com")
+# Render автоматически предоставляет этот URL.
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
+# Если Render не передал URL (например, локальный запуск), укажи свой домен вручную
+if not RENDER_URL or "YOUR_DOMAIN" in RENDER_URL:
+    RENDER_URL = "https://tg-pc-server.onrender.com"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -27,12 +31,24 @@ last_processed_reports = {}  # host_id -> last_report_text
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    webhook_url = f"{RENDER_URL}/webhook"
-    logging.info(f"Установка вебхука: {webhook_url}")
-    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    # Гарантируем, что URL вебхука сформирован без лишних слэшей
+    base_url = RENDER_URL.rstrip("/")
+    webhook_url = f"{base_url}/webhook"
+    
+    logging.info(f"--- УСТАНОВКА ВЕБХУКА TG --- URL: {webhook_url}")
+    try:
+        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logging.info("--- ВЕБХУК УСПЕШНО УСТАНОВЛЕН ---")
+    except Exception as e:
+        logging.error(f"⚠️ Критическая ошибка установки вебхука: {e}")
+        
     yield
-    logging.info("Удаление вебхука...")
-    await bot.delete_webhook()
+    
+    logging.info("--- УДАЛЕНИЕ ВЕБХУКА TG ---")
+    try:
+        await bot.delete_webhook()
+    except Exception as e:
+        logging.error(f"Ошибка при удалении вебхука: {e}")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -44,7 +60,7 @@ def get_file_manager_keyboard(items, current_dir):
     folders = [x for x in items if x.get("type") == "folder"]
     files = [x for x in items if x.get("type") == "file"]
     
-    # Ограничиваем вывод, чтобы кнопки не уперлись в лимиты Telegram (макс 100 кнопок)
+    # Ограничиваем вывод (макс 30 папок и 30 файлов), чтобы не превысить лимиты TG
     for folder in folders[:30]:
         name = folder.get("name", "")
         keyboard.append([InlineKeyboardButton(text=f"📁 {name}", callback_data=f"cd_{name}")])
@@ -77,14 +93,18 @@ async def poll(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
         
     host_id = payload.get("host_id")
-    uid = payload.get("uid")
+    uid_raw = payload.get("uid")
     
-    if not host_id or not uid: 
+    if not host_id or not uid_raw: 
         return {"commands": [], "clear_report": False}
     
-    uid = int(uid)
+    try:
+        uid = int(uid_raw)
+    except ValueError:
+        logging.error(f"Получен некорректный uid (не число): {uid_raw}")
+        return {"commands": [], "clear_report": False}
     
-    # Регистрация или обновление хоста в сети
+    # Регистрация хоста
     if host_id not in active_hosts:
         active_hosts[host_id] = {"owner_id": uid, "status": "online", "commands": []}
     
@@ -126,12 +146,11 @@ async def poll(request: Request):
                         except Exception:
                             pass
                 except Exception as e:
-                    logging.error(f"Ошибка удаления сообщения: {e}")
+                    logging.error(f"Ошибка удаления уведомления: {e}")
 
             asyncio.create_task(send_and_delete_report(uid, text_str))
         else:
             should_clear_report = True
-    # === КОНЕЦ БЛОКА АВТОУДАЛЕНИЯ ===
 
     # Обработка процессов
     if "processes" in payload:
@@ -157,7 +176,7 @@ async def poll(request: Request):
         input_file = BufferedInputFile(raw_data, filename="screenshot.png")
         await bot.send_photo(chat_id=uid, photo=input_file, caption="📸 Скриншот экрана ПК")
 
-    # Обновляем основную панель интерфейса
+    # Обновляем панель проводника в чате
     if "items" in payload or "current_dir" in payload:
         if last_msg_id:
             try:
@@ -172,19 +191,20 @@ async def poll(request: Request):
             except Exception:
                 pass
 
-    # Отдаем команды агенту
+    # Отдаем команды накопленные для агента
     commands = active_hosts[host_id].get("commands", [])
     active_hosts[host_id]["commands"] = [] 
     
     return {"commands": commands, "clear_report": should_clear_report}
 
-# Хэндлер на команду /start
+
+# === БЛОК ХЭНДЛЕРОВ AIOGRAM ===
+
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     uid = message.from_user.id
     user_sessions[uid] = {"state": None, "last_msg_id": None}
     
-    # Ищем, нет ли уже онлайн-хоста для этого юзера
     target_host = None
     for hid, data in active_hosts.items():
         if data.get("owner_id") == uid:
@@ -203,25 +223,6 @@ async def start_cmd(message: types.Message):
     else:
         await message.answer("👋 Привет! Твой ПК пока оффлайн. Запусти скрипт-агент на компьютере.")
 
-# Хэндлер для отправки консольных команд
-@dp.message()
-async def handle_text_messages(message: types.Message):
-    uid = message.from_user.id
-    session = user_sessions.get(uid, {})
-    host_id = session.get("current_host")
-    state = session.get("state")
-    
-    if not host_id or host_id not in active_hosts:
-        await message.answer("❌ Нет активного подключения к ПК. Запусти агент.")
-        return
-
-    if state == "awaiting_cmd":
-        active_hosts[host_id]["commands"].append({"type": "cmd_exec", "param": message.text})
-        user_sessions[uid]["state"] = None
-        await message.answer(f"⏳ Команда `{message.text}` отправлена на исполнение...")
-        return
-
-# Обработчик нажатий на инлайн-кнопки
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     uid = callback.from_user.id
@@ -276,7 +277,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         active_hosts[host_id]["commands"].append({"type": "delete_file", "param": f_name})
         await callback.answer("Удаление...")
 
-    elif data.startswith("back_to_manager"):
+    elif data == "back_to_manager":
         kb = get_file_manager_keyboard(active_hosts[host_id]["items"], active_hosts[host_id]["current_dir"])
         await bot.edit_message_text(
             chat_id=uid,
@@ -308,21 +309,38 @@ async def handle_callbacks(callback: types.CallbackQuery):
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
         await callback.answer("Команда на выключение отправлена!", show_alert=True)
 
+@dp.message()
+async def handle_text_messages(message: types.Message):
+    uid = message.from_user.id
+    session = user_sessions.get(uid, {})
+    host_id = session.get("current_host")
+    state = session.get("state")
+    
+    if not host_id or host_id not in active_hosts:
+        await message.answer("❌ Нет активного подключения к ПК. Запусти агент.")
+        return
+
+    if state == "awaiting_cmd":
+        active_hosts[host_id]["commands"].append({"type": "cmd_exec", "param": message.text})
+        user_sessions[uid]["state"] = None
+        await message.answer(f"⏳ Команда `{message.text}` отправлена на исполнение...")
+        return
+
+
 # Точка входа для вебхуков Telegram
 @app.post("/webhook")
 async def webhook_endpoint(request: Request):
     try:
         json_data = await request.json()
+        logging.info(f"📥 [TG WEBHOOK LOG]: Получен апдейт: {json_data}")
+        
         update = types.Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
         return {"status": "ok"}
     except Exception as e:
-        logging.error(f"Ошибка в эндпоинте вебхука: {e}")
+        logging.error(f"❌ Ошибка внутри эндпоинта вебхука: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# === ДОБАВЛЕННЫЙ БЛОК ДЛЯ СТАРТА НА RENDER ===
 if __name__ == "__main__":
-    # Динамически получаем порт из переменной среды хостинга, по дефолту ставим 8000
     port = int(os.getenv("PORT", 8000))
-    # Запускаем сервер на 0.0.0.0, чтобы он принимал входящие запросы
     uvicorn.run("server:app", host="0.0.0.0", port=port)
