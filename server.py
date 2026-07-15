@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 # Замени на свой реальный токен бота
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  
+BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
