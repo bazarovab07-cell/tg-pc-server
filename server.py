@@ -255,3 +255,24 @@ async def power_cmd(callback: types.CallbackQuery):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+import threading
+import time
+
+def send_and_delete_report(bot, chat_id, text, delay=5):
+    try:
+        # Отправляем сообщение в Telegram
+        msg = bot.send_message(chat_id, text)
+        
+        # Функция, которая подождёт и удалит сообщение
+        def delayed_delete():
+            time.sleep(delay)
+            try:
+                bot.delete_message(chat_id, msg.message_id)
+            except Exception as e:
+                print(f"Не удалось удалить сообщение: {e}")
+                
+        # Запускаем удаление в отдельном потоке, чтобы сервер не зависал на 5 секунд
+        threading.Thread(target=delayed_delete, daemon=True).start()
+    except Exception as e:
+        print(f"Ошибка отправки отчета: {e}")
