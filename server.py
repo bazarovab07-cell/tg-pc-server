@@ -12,7 +12,7 @@ bot = telebot.TeleBot(TOKEN)
 
 ADMIN_ID = 7779752480  # Укажи свой ID
 UPDATE_FILE_PATH = "Agent.exe"  # Зафиксированная константа названия EXE
-current_update_version = 0
+current_update_version = 1
 
 hosts_data = {}
 
