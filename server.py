@@ -9,7 +9,7 @@ from telebot import types
 app = Flask(__name__)
 
 # Токен твоего Telegram бота
-TOKEN = "СЮДА_ТОКЕН_ТВОЕГО_БОТА"
+TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"
 bot = telebot.TeleBot(TOKEN)
 
 # === НАСТРОЙКИ ОБНОВЛЕНИЯ И АДМИНИСТРИРОВАНИЯ ===
