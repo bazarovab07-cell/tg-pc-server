@@ -13,7 +13,7 @@ TOKEN = "СЮДА_ТОКЕН_ТВОЕГО_БОТА"
 bot = telebot.TeleBot(TOKEN)
 
 # === НАСТРОЙКИ ОБНОВЛЕНИЯ И АДМИНИСТРИРОВАНИЯ ===
-ADMIN_ID = 123456789  # <=== ВСТАВЬ СЮДА СВОЙ TELEGRAM ID
+ADMIN_ID = 7779752480  # <=== ВСТАВЬ СЮДА СВОЙ TELEGRAM ID
 UPDATE_FILE_PATH = "latest_update.exe"
 current_update_version = 0  # Счётчик версий
 # ===============================================
