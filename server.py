@@ -1,42 +1,27 @@
 import os
 import logging
+import threading
+import time
 import telebot
 from telebot import types
 from flask import Flask, request, jsonify, send_from_directory
 
-# Настройка логирования для панели Render
+# Настройка логирования, чтобы всё было видно в панели Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gunicorn.error')
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
-# Сюда вставь чистый URL твоего приложения на Render (без косой черты на конце)
-# Пример: "https://tg-pc-server.onrender.com"
-RENDER_URL = "https://tg-pc-server.onrender.com"  
-
+BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # <--- ВСТАВЬ СЮДА СВОЙ РЕАЛЬНЫЙ ТОКЕН!
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Хранилища данных в памяти сервера
+# Хранилища данных в оперативной памяти сервера
 hosts_db = {}
 commands_queue = {}
 
 UPDATE_DIR = os.path.join(os.getcwd(), "updates")
 if not os.path.exists(UPDATE_DIR):
     os.makedirs(UPDATE_DIR)
-
-# === ОБРАБОТКА ВЕБХУКА TELEGRAM ===
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def telegram_webhook():
-    """Сюда Telegram будет присылать все сообщения пользователей"""
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    else:
-        return 'Forbidden', 403
 
 # === ЛОГИКА TELEGRAM БОТА ===
 
@@ -78,7 +63,7 @@ def bot_status(message):
         if info.get("user_id") == user_id:
             text += f"● `{hid}` — Онлайн\n📍 Папка: `{info.get('current_dir', 'Не определена')}`\n"
             found = True
-    bot.send_message(user_id, text if found else "❌ Нет active подключений. Запусти Агент на ПК.", parse_mode="Markdown")
+    bot.send_message(user_id, text if found else "❌ Нет активных подключений. Запусти Агент на ПК.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == "📸 Сделать скриншот")
 def bot_screenshot(message):
@@ -139,24 +124,32 @@ def handle_callbacks(call):
         elif action == "back":
             commands_queue.setdefault(target_host, []).append({"action": "cd_back", "data": ""})
             
-        bot.answer_callback_query(call.id, "⏳ Запрос на переход отправлен...")
+        bot.answer_callback_query(call.id, "⏳ Запрос отправлен...")
         
     bot.answer_callback_query(call.id)
+
+# Функция бесконечного опроса Telegram (Infinity Polling) с авто-рестартом при сбоях сети
+def run_bot_polling():
+    logger.info("=== ИНИЦИАЛИЗАЦИЯ ПОТОКА БОТА ===")
+    while True:
+        try:
+            logger.info("Бот запускает infinity_polling...")
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except Exception as e:
+            logger.error(f"Ошибка пуллинга бота, перезапуск через 5 сек: {e}")
+            time.sleep(5)
+
+# ЗАПУСКАЕМ ПОТОК БОТА СРАЗУ ПРИ ЗАГРУЗКЕ ФАЙЛА СЕРВЕРА
+# Это заставит Gunicorn выполнить этот код железно
+bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+bot_thread.start()
 
 
 # === ЛОГИКА ВЕБ-СЕРВЕРА FLASK ===
 
 @app.route('/', methods=['GET'])
 def index():
-    # Принудительно устанавливаем вебхук при заходе на главную страницу для проверки
-    webhook_url = f"{RENDER_URL}/{BOT_TOKEN}"
-    logger.info(f"Установка вебхука на URL: {webhook_url}")
-    bot.remove_webhook()
-    success = bot.set_webhook(url=webhook_url)
-    if success:
-        return f"<h1>Server is Live!</h1><p>Вебхук успешно привязан к Telegram!</p>", 200
-    else:
-        return f"<h1>Ошибка!</h1><p>Не удалось установить вебхук.</p>", 500
+    return "<h1>Server is Live!</h1><p>Flask-сервер и фоновый поток Telegram-бота запущены успешно.</p>", 200
 
 @app.route('/poll', methods=['POST'])
 def poll():
@@ -228,6 +221,7 @@ def get_update():
         return send_from_directory(UPDATE_DIR, filename, as_attachment=True)
     return "No update file found", 404
 
+# Этот блок выполнится локально, если будешь тестить на компе
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
