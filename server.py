@@ -1,30 +1,42 @@
 import os
 import logging
-import threading
 import telebot
 from telebot import types
 from flask import Flask, request, jsonify, send_from_directory
 
-# Настройка логирования, которая точно пишется в консоль Render
+# Настройка логирования для панели Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gunicorn.error')
 
 # === КОНФИГУРАЦИЯ ===
 BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
+# Сюда вставь чистый URL твоего приложения на Render (без косой черты на конце)
+# Пример: "https://tg-pc-server.onrender.com"
+RENDER_URL = "https://tg-pc-server.onrender.com"  
+
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
 # Хранилища данных в памяти сервера
 hosts_db = {}
 commands_queue = {}
-last_reports = {}
 
 UPDATE_DIR = os.path.join(os.getcwd(), "updates")
 if not os.path.exists(UPDATE_DIR):
     os.makedirs(UPDATE_DIR)
 
-# Переменная для контроля единичного запуска бота
-bot_initialized = False
+# === ОБРАБОТКА ВЕБХУКА TELEGRAM ===
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def telegram_webhook():
+    """Сюда Telegram будет присылать все сообщения пользователей"""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return 'Forbidden', 403
 
 # === ЛОГИКА TELEGRAM БОТА ===
 
@@ -66,7 +78,7 @@ def bot_status(message):
         if info.get("user_id") == user_id:
             text += f"● `{hid}` — Онлайн\n📍 Папка: `{info.get('current_dir', 'Не определена')}`\n"
             found = True
-    bot.send_message(user_id, text if found else "❌ Нет активных подключений. Запусти Агент на ПК.", parse_mode="Markdown")
+    bot.send_message(user_id, text if found else "❌ Нет active подключений. Запусти Агент на ПК.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == "📸 Сделать скриншот")
 def bot_screenshot(message):
@@ -131,30 +143,20 @@ def handle_callbacks(call):
         
     bot.answer_callback_query(call.id)
 
-def run_bot_polling():
-    logger.info("=== ИНИЦИАЛИЗАЦИЯ BOT.INFINITY_POLLING ===")
-    try:
-        # Проверяем токен перед запуском
-        me = bot.get_me()
-        logger.info(f"=== УСПЕШНО АВТОРИЗОВАН: @{me.username} ===")
-        bot.infinity_polling(skip_pending=True)
-    except Exception as e:
-        logger.error(f"!!! КРИТИЧЕСКАЯ ОШИБКА БОТА: {e} !!!", exc_info=True)
 
 # === ЛОГИКА ВЕБ-СЕРВЕРА FLASK ===
 
-@app.before_request
-def init_bot_on_first_request():
-    global bot_initialized
-    if not bot_initialized:
-        bot_initialized = True
-        logger.info("=== ПЕРВЫЙ ЗАПРОС ПРИНЯТ. ЗАПУСКАЮ ПОТОК БОТА ===")
-        t = threading.Thread(target=run_bot_polling, daemon=True)
-        t.start()
-
 @app.route('/', methods=['GET'])
 def index():
-    return "<h1>Server is Live!</h1><p>Бот и сервер запущены.</p>", 200
+    # Принудительно устанавливаем вебхук при заходе на главную страницу для проверки
+    webhook_url = f"{RENDER_URL}/{BOT_TOKEN}"
+    logger.info(f"Установка вебхука на URL: {webhook_url}")
+    bot.remove_webhook()
+    success = bot.set_webhook(url=webhook_url)
+    if success:
+        return f"<h1>Server is Live!</h1><p>Вебхук успешно привязан к Telegram!</p>", 200
+    else:
+        return f"<h1>Ошибка!</h1><p>Не удалось установить вебхук.</p>", 500
 
 @app.route('/poll', methods=['POST'])
 def poll():
