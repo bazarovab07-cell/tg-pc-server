@@ -5,7 +5,7 @@ import telebot
 from telebot import types
 from flask import Flask, request, jsonify, send_from_directory
 
-# Настройка логирования
+# Настройка логирования для отслеживания в консоли Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -14,15 +14,16 @@ BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # <--- ВСТАВЬ СЮДА СВО�
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Хранилища данных
+# Хранилища данных в памяти сервера
 hosts_db = {}
 commands_queue = {}
 last_reports = {}
+
 UPDATE_DIR = os.path.join(os.getcwd(), "updates")
 if not os.path.exists(UPDATE_DIR):
     os.makedirs(UPDATE_DIR)
 
-# === ЛОГИКА БОТА ===
+# === ЛОГИКА TELEGRAM БОТА ===
 
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -46,7 +47,12 @@ def get_apps_keyboard():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "Привет! Используй кнопки для управления ПК.", reply_markup=get_main_keyboard())
+    bot.send_message(
+        message.chat.id, 
+        f"Привет! Твой Telegram ID: `{message.chat.id}`\nИспользуй кнопки ниже для управления ПК.", 
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
 
 @bot.message_handler(func=lambda message: message.text == "🖥️ Статус ПК")
 def bot_status(message):
@@ -55,9 +61,9 @@ def bot_status(message):
     found = False
     for hid, info in hosts_db.items():
         if info.get("user_id") == user_id:
-            text += f"● `{hid}` — Онлайн\n"
+            text += f"● `{hid}` — Онлайн\n📍 Папка: `{info.get('current_dir', 'Не определена')}`\n"
             found = True
-    bot.send_message(user_id, text if found else "❌ Нет активных подключений.", parse_mode="Markdown")
+    bot.send_message(user_id, text if found else "❌ Нет активных подключений. Запусти Агент на ПК.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == "📸 Сделать скриншот")
 def bot_screenshot(message):
@@ -65,9 +71,9 @@ def bot_screenshot(message):
     for hid, info in hosts_db.items():
         if info.get("user_id") == user_id:
             commands_queue.setdefault(hid, []).append({"action": "stream", "data": ""})
-            bot.send_message(user_id, "⏳ Команда отправлена.")
+            bot.send_message(user_id, "⏳ Запрос на скриншот отправлен агенту...")
             return
-    bot.send_message(user_id, "❌ Нет активных ПК.")
+    bot.send_message(user_id, "❌ Нет активных ПК для этой команды.")
 
 @bot.message_handler(func=lambda message: message.text == "📁 Проводник (Диски)")
 def bot_explorer(message):
@@ -75,80 +81,149 @@ def bot_explorer(message):
     for hid, info in hosts_db.items():
         if info.get("user_id") == user_id:
             commands_queue.setdefault(hid, []).append({"action": "get_drives", "data": ""})
-            bot.send_message(user_id, "⏳ Получаю список дисков...")
+            bot.send_message(user_id, "⏳ Запрашиваю список дисков компьютера...")
             return
     bot.send_message(user_id, "❌ Нет активных ПК.")
 
 @bot.message_handler(func=lambda message: message.text == "🎮 Запуск программ")
 def bot_apps(message):
-    bot.send_message(message.chat.id, "Выберите программу:", reply_markup=get_apps_keyboard())
+    bot.send_message(message.chat.id, "Выберите программу для запуска на ПК:", reply_markup=get_apps_keyboard())
 
 @bot.message_handler(func=lambda message: message.text == "🔌 Управление питанием")
 def bot_power(message):
-    bot.send_message(message.chat.id, "Выберите действие:", reply_markup=get_power_keyboard())
+    bot.send_message(message.chat.id, "Выберите действие с питанием:", reply_markup=get_power_keyboard())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     user_id = str(call.message.chat.id)
     target_host = next((hid for hid, info in hosts_db.items() if info.get("user_id") == user_id), None)
+    
     if not target_host:
-        bot.answer_callback_query(call.id, "Устройство не найдено.")
+        bot.answer_callback_query(call.id, "❌ Устройство не найдено.")
         return
     
     if call.data.startswith("power_"):
-        commands_queue.setdefault(target_host, []).append({"action": "power", "data": call.data.split("_")[1]})
+        action = call.data.split("_")[1]
+        commands_queue.setdefault(target_host, []).append({"action": "power", "data": action})
+        bot.edit_message_text(f"🚀 Отправлена команда: Питание -> {action}", call.message.chat.id, call.message.message_id)
+        
     elif call.data.startswith("run_"):
-        commands_queue.setdefault(target_host, []).append({"action": "run_app", "data": call.data.split("_")[1]})
+        app_name = call.data.split("_")[1]
+        commands_queue.setdefault(target_host, []).append({"action": "run_app", "data": app_name})
+        bot.edit_message_text(f"🚀 Отправлена команда: Запуск {app_name.capitalize()}", call.message.chat.id, call.message.message_id)
+        
     elif call.data.startswith("explore_"):
         parts = call.data.split("_")
         action = parts[1]
         data = "_".join(parts[2:]) if len(parts) > 2 else ""
-        commands_queue.setdefault(target_host, []).append({"action": f"cd_{action}" if action in ['drive', 'cd'] else "cd_back", "data": data})
         
-    bot.answer_callback_query(call.id, "Команда принята")
+        if action == "drive":
+            commands_queue.setdefault(target_host, []).append({"action": "set_drive", "data": data})
+        elif action == "cd":
+            commands_queue.setdefault(target_host, []).append({"action": "cd_into", "data": data})
+        elif action == "back":
+            commands_queue.setdefault(target_host, []).append({"action": "cd_back", "data": ""})
+            
+        bot.answer_callback_query(call.id, "⏳ Запрос на переход отправлен...")
+        
+    bot.answer_callback_query(call.id)
 
 def run_bot_polling():
-    logger.info("Бот запущен!")
-    bot.infinity_polling(skip_pending=True)
+    logger.info("Инициализация bot.infinity_polling...")
+    try:
+        bot.infinity_polling(skip_pending=True)
+    except Exception as e:
+        logger.error(f"Ошибка в работе циклического опроса бота: {e}")
 
-# === ЛОГИКА СЕРВЕРА ===
+# === ЖЕЛЕЗОБЕТОННЫЙ ЗАПУСК ПОТОКА БОТА ДЛЯ GUNICORN ===
+# Код выполняется при импорте модуля веб-сервером, обходя блок __main__
+print("=== СТАРТ ПОТОКА ТЕЛЕГРАМ БОТА ===", flush=True)
+bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+bot_thread.start()
+
+
+# === ЛОГИКА ВЕБ-СЕРВЕРА FLASK ===
+
+@app.route('/', methods=['GET'])
+def index():
+    return "<h1>Server is Live!</h1><p>Бот и сервер успешно запущены на Render.</p>", 200
 
 @app.route('/poll', methods=['POST'])
 def poll():
     data = request.json or {}
     host_id = data.get("host_id")
     user_id = data.get("user_id")
-    if not host_id or not user_id: return jsonify({"error": "No ID"}), 400
     
-    hosts_db[host_id] = {"user_id": user_id, "current_dir": data.get("current_dir", "")}
+    if not host_id or not user_id: 
+        return jsonify({"error": "Missing host_id or user_id"}), 400
     
+    # Обновляем базу данных активных хостов
+    hosts_db[host_id] = {
+        "user_id": user_id, 
+        "current_dir": data.get("current_dir", ""),
+        "status": data.get("status", "online")
+    }
+    
+    # Если агент прислал текстовый отчет
     if data.get("report"):
-        bot.send_message(user_id, f"✅ Отчет от {host_id}:\n{data['report']}")
+        bot.send_message(user_id, f"✅ Отчет от ПК `{host_id}`:\n\n{data['report']}", parse_mode="Markdown")
+        
+    # Если агент сообщил, что данные папки/дисков готовы к отрисовке
     if data.get("event_type") == "explorer_ready":
-        # Логика отрисовки кнопок для проводника
-        markup = types.InlineKeyboardMarkup()
-        for item in data.get("items", []):
-            markup.add(types.InlineKeyboardButton(item['name'], callback_data=f"explore_cd_{item['name']}"))
-        bot.send_message(user_id, "Содержимое папки:", reply_markup=markup)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        items = data.get("items", [])
+        current_dir = data.get("current_dir", "")
+        
+        if not current_dir:
+            text = "Выберите диск компьютера:"
+            for item in items:
+                markup.add(types.InlineKeyboardButton(f"💽 {item['name']}", callback_data=f"explore_drive_{item['name']}"))
+        else:
+            text = f"Папка: `{current_dir}`\n\nВыберите элемент:"
+            markup.add(types.InlineKeyboardButton("⬅️ Назад (Вверх)", callback_data="explore_back_"))
+            
+            # Выводим первые 10 папок, чтобы не превышать лимиты кнопок Telegram
+            for item in items[:10]:
+                if item.get("is_dir"):
+                    markup.add(types.InlineKeyboardButton(f"📁 {item['name']}", callback_data=f"explore_cd_{item['name']}"))
+                    
+        bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
 
+    # Вытаскиваем команды из очереди для передачи их агенту
     cmds = commands_queue.get(host_id, [])
-    commands_queue[host_id] = []
-    return jsonify({"status": "ok", "commands": cmds})
+    commands_queue[host_id] = [] # Очищаем очередь команд
+    
+    return jsonify({
+        "status": "ok", 
+        "commands": cmds,
+        "update_version": 2
+    }), 200
 
 @app.route('/upload_screenshot', methods=['POST'])
 def upload_screenshot():
     host_id = request.args.get("host_id")
     user_id = request.args.get("user_id")
+    
     if user_id and request.data:
-        temp_f = f"temp_{host_id}.jpg"
-        with open(temp_f, "wb") as f: f.write(request.data)
-        with open(temp_f, "rb") as ph: bot.send_photo(user_id, ph)
-        os.remove(temp_f)
-    return "ok", 200
+        temp_filename = f"temp_{host_id}.jpg"
+        with open(temp_filename, "wb") as f: 
+            f.write(request.data)
+            
+        with open(temp_filename, "rb") as ph: 
+            bot.send_photo(user_id, ph, caption=f"📸 Скриншот экрана ПК ({host_id})")
+            
+        os.remove(temp_filename)
+        return "Screenshot uploaded", 200
+    return "Invalid data", 400
 
-# === ЗАПУСК ===
+@app.route('/get_update', methods=['GET'])
+def get_update():
+    filename = "Agent_update.exe"
+    if os.path.exists(os.path.join(UPDATE_DIR, filename)):
+        return send_from_directory(UPDATE_DIR, filename, as_attachment=True)
+    return "No update file found", 404
+
+# Блок локального запуска (для тестов на ПК, Render его пропустит)
 if __name__ == "__main__":
-    t = threading.Thread(target=run_bot_polling, daemon=True)
-    t.start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
