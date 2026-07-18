@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
+BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgk0M23tANZoIpR3VU34"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
