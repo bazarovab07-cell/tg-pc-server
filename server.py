@@ -1,190 +1,321 @@
+import sys
+import time
 import os
-import logging
-import telebot
-from telebot import types
-from flask import Flask, request, jsonify
+import platform
+import subprocess
+import threading
+import requests
+import tkinter as tk
+from tkinter import messagebox, ttk
+from PIL import Image, ImageDraw
+import pystray
+from pystray import MenuItem as item
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('gunicorn.error')
+# === КОНФИГУРАЦИЯ СЕРВЕРА ===
+SERVER_URL = "https://tg-pc-server.onrender.com"  # <--- ТВОЙ URL НА RENDER
+HOST_ID = platform.node()
+ID_FILE = "user_id.txt"
 
-BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  # <--- ВСТАВЬ СВОЙ ТОКЕН
-RENDER_URL = "https://tg-pc-server.onrender.com"  # <--- ВСТАВЬ URL БЕЗ /
+# Переменные для работы агента в фоне
+current_dir = ""
+is_running = False
+user_id = ""
 
-bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+# Тематические цвета
+THEMES = {
+    "Тёмная": {
+        "bg": "#1e1e1e", "fg": "#ffffff", "entry_bg": "#2d2d2d", 
+        "btn_bg": "#007acc", "btn_fg": "#ffffff", "status_on": "#4caf50", "status_off": "#f44336"
+    },
+    "Светлая": {
+        "bg": "#f5f5f5", "fg": "#333333", "entry_bg": "#ffffff", 
+        "btn_bg": "#2196f3", "btn_fg": "#ffffff", "status_on": "#4caf50", "status_off": "#f44336"
+    }
+}
+current_theme = "Тёмная"
 
-hosts_db = {}
-commands_queue = {}
+def load_user_id():
+    if os.path.exists(ID_FILE):
+        with open(ID_FILE, "r") as f:
+            return f.read().strip()
+    return ""
 
-# Хранилище ID сообщений для каждого пользователя, чтобы обновлять их интерфейс
-user_ui_messages = {}
+def save_user_id(uid):
+    with open(ID_FILE, "w") as f:
+        f.write(uid.strip())
 
-# === ЛОГИКА TELEGRAM БОТА ===
-def get_main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(types.KeyboardButton("🖥️ Статус ПК"), types.KeyboardButton("📸 Сделать скриншот"))
-    markup.add(types.KeyboardButton("📁 Проводник (Диски)"), types.KeyboardButton("⚙️ Диспетчер задач"))
-    markup.add(types.KeyboardButton("🎮 Запуск программ"), types.KeyboardButton("🔌 Управление питанием"))
-    return markup
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.send_message(message.chat.id, "Привет! Бот готов к работе.", reply_markup=get_main_keyboard())
-
-@bot.message_handler(func=lambda message: message.text == "🖥️ Статус ПК")
-def bot_status(message):
-    user_id = str(message.chat.id)
-    text = "*Твои устройства:*\n\n"
-    found = False
-    for hid, info in hosts_db.items():
-        if info.get("user_id") == user_id:
-            text += f"● `{hid}` — Онлайн\n"
-            found = True
-    bot.send_message(user_id, text if found else "❌ Нет active подключений.", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.text in ["📸 Сделать скриншот", "📁 Проводник (Диски)", "⚙️ Диспетчер задач"])
-def handle_menu_commands(message):
-    user_id = str(message.chat.id)
-    target_host = next((hid for hid, info in hosts_db.items() if info.get("user_id") == user_id), None)
+# === ОБНОВЛЕННАЯ ФУНКЦИЯ ДИСПЕТЧЕРА ЗАДАЧ (ФИЛЬТРАЦИЯ СИСТЕМНОГО МУСОРА) ===
+def get_running_tasks():
+    tasks = []
+    # Список ключевых слов системных процессов Windows, которые мы гарантированно скрываем
+    SYSTEM_IGNORE = {
+        "svchost.exe", "conhost.exe", "taskhostw.exe", "explorer.exe", "runtimebroker.exe",
+        "smartscreen.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+        "lsass.exe", "services.exe", "wininit.exe", "csrss.exe", "smss.exe", "winlogon.exe",
+        "spoolsv.exe", "sihost.exe", "fontdrvhost.exe", "dwm.exe", "ctfmon.exe", "tasklist.exe",
+        "dllhost.exe", "audiodg.exe", "wlanext.exe", "conhost.exe", "nvvsvc.exe", "nvxdsync.exe",
+        "wmiinv.exe", "wmiprvse.exe", "System", "Idle", "Registry", "Memory Compression"
+    }
     
-    if not target_host:
-        bot.send_message(user_id, "❌ Твой ПК не найден в сети.")
-        return
-
-    # Отправляем базовое сообщение, которое потом будем редактировать
-    status_msg = bot.send_message(user_id, "⏳ Запрос отправлен на ПК, ожидание данных...")
-    user_ui_messages[user_id] = status_msg.message_id
-
-    if message.text == "📸 Сделать скриншот":
-        commands_queue.setdefault(target_host, []).append({"action": "stream", "data": ""})
-    elif message.text == "📁 Проводник (Диски)":
-        commands_queue.setdefault(target_host, []).append({"action": "get_drives", "data": ""})
-    elif message.text == "⚙️ Диспетчер задач":
-        commands_queue.setdefault(target_host, []).append({"action": "get_tasks", "data": ""})
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    user_id = str(call.message.chat.id)
-    target_host = next((hid for hid, info in hosts_db.items() if info.get("user_id") == user_id), None)
-    
-    if not target_host:
-        bot.answer_callback_query(call.id, "❌ ПК не найден.")
-        return
-
-    # Запоминаем ID сообщения, в котором кликнули кнопку, чтобы обновить его
-    user_ui_messages[user_id] = call.message.message_id
-
-    if call.data.startswith("kill_task_"):
-        task_name = call.data.replace("kill_task_", "")
-        commands_queue.setdefault(target_host, []).append({"action": "kill_task", "data": task_name})
-        bot.answer_callback_query(call.id, f"Убиваю процесс {task_name}...")
-        
-        # Сразу меняем текст на статус ожидания
-        bot.edit_message_text("⏳ Запрос на закрытие процесса отправлен, обновляю список...", user_id, call.message.message_id)
-        
-    bot.answer_callback_query(call.id)
-
-# === ВЕБХУК ТЕЛЕГРАМА ===
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def telegram_webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return 'Forbidden', 403
-
-@app.route('/', methods=['GET'])
-def index():
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
-    return "<h1>Сервер и Редактируемый Вебхук Активны!</h1>", 200
-
-# === ПОДКЛЮЧЕНИЕ АГЕНТА ===
-@app.route('/poll', methods=['POST'])
-def poll():
-    data = request.json or {}
-    host_id = data.get("host_id")
-    user_id = str(data.get("user_id", ""))
-    
-    if not host_id or not user_id: 
-        return jsonify({"error": "Missing params"}), 400
-    
-    hosts_db[host_id] = {"user_id": user_id, "status": "online"}
-    
-    ui_msg_id = user_ui_messages.get(user_id)
-
-    # 1. Если прилетел список задач (Диспетчер задач)
-    if data.get("event_type") == "tasks_ready":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        tasks = data.get("items", [])
-        
-        text = "⚙️ *Диспетчер задач*\nНажми кнопку, чтобы принудительно закрыть процесс:\n\n"
-        for task in tasks[:15]:
-            text += f"• `{task['name']}`\n"
-            markup.add(types.InlineKeyboardButton(f"❌ Закрыть {task['name']}", callback_data=f"kill_task_{task['name']}"))
-            
-        if ui_msg_id:
-            try: bot.edit_message_text(text, user_id, ui_msg_id, reply_markup=markup, parse_mode="Markdown")
-            except: bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
-        else:
-            bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    # 2. Если прилетел список дисков или папок (Проводник)
-    elif data.get("event_type") == "explorer_ready":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        items = data.get("items", [])
-        current_dir = data.get("current_dir", "")
-        
-        if not current_dir:
-            text = "📁 *Проводник:* Выберите диск компьютера:"
-            for item in items:
-                markup.add(types.InlineKeyboardButton(f"💽 {item['name']}", callback_data=f"explore_drive_{item['name']}"))
-        else:
-            text = f"📁 *Папка:* `{current_dir}`"
-            markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="explore_back_"))
-            for item in items[:10]:
-                if item.get("is_dir"):
-                    markup.add(types.InlineKeyboardButton(f"📁 {item['name']}", callback_data=f"explore_cd_{item['name']}"))
+    try:
+        if platform.system() == "Windows":
+            output = subprocess.check_output('tasklist /NH /FO CSV', shell=True).decode('cp1251', errors='ignore')
+            seen = set()
+            for line in output.split('\n'):
+                if line.strip():
+                    parts = line.split(',')
+                    name = parts[0].strip('"')
+                    name_lower = name.lower()
                     
-        if ui_msg_id:
-            try: bot.edit_message_text(text, user_id, ui_msg_id, reply_markup=markup, parse_mode="Markdown")
-            except: bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
+                    # Проверяем, чтобы процесс был .exe, не был в списке игнорируемых и не содержал служебных слов Windows
+                    if (name.endswith('.exe') and 
+                        name not in seen and 
+                        name not in SYSTEM_IGNORE and 
+                        not name_lower.startswith("microsoft") and 
+                        not name_lower.startswith("win")):
+                        
+                        seen.add(name)
+                        tasks.append({"name": name})
         else:
-            bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
+            # Для Linux/Mac базовый вывод пользовательских процессов
+            output = subprocess.check_output("ps -eo comm=", shell=True).decode('utf-8', errors='ignore')
+            seen = set()
+            for name in output.split('\n'):
+                name = name.strip()
+                if name and name not in seen and not name.startswith("[") and name != "ps":
+                    seen.add(name)
+                    tasks.append({"name": name})
+    except Exception as e:
+        print(f"Ошибка сбора задач: {e}")
+    return tasks
 
-    # 3. Пересылка обычных текстовых отчетов (например, об успешном закрытии процесса)
-    elif data.get("report"):
-        text = f"✅ `{host_id}`: {data['report']}"
-        if ui_msg_id:
-            try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
-            except: bot.send_message(user_id, text, parse_mode="Markdown")
-        else:
-            bot.send_message(user_id, text, parse_mode="Markdown")
-
-    cmds = commands_queue.get(host_id, [])
-    commands_queue[host_id] = []
-    return jsonify({"status": "ok", "commands": cmds}), 200
-
-@app.route('/upload_screenshot', methods=['POST'])
-def upload_screenshot():
-    host_id = request.args.get("host_id")
-    user_id = request.args.get("user_id")
+def execute_command(cmd):
+    global current_dir, user_id
+    action = cmd.get("action")
+    data = cmd.get("data")
     
-    # Скриншоты нельзя запихнуть в текстовое изменение, поэтому старое статусное сообщение
-    # мы просто удаляем, чтобы чат оставался чистым, и шлем готовую картинку.
-    ui_msg_id = user_ui_messages.get(user_id)
-    if ui_msg_id:
-        try: bot.delete_message(user_id, ui_msg_id)
-        except: pass
+    report = ""
+    event_type = None
+    items = []
+
+    try:
+        if action == "stream":
+            import pyautogui
+            screenshot_path = "screen.jpg"
+            pyautogui.screenshot(screenshot_path)
+            with open(screenshot_path, "rb") as f:
+                requests.post(f"{SERVER_URL}/upload_screenshot?host_id={HOST_ID}&user_id={user_id}", data=f.read())
+            os.remove(screenshot_path)
+            return
+
+        elif action == "get_tasks":
+            items = get_running_tasks()
+            event_type = "tasks_ready"
+
+        elif action == "kill_task":
+            if platform.system() == "Windows":
+                os.system(f"taskkill /F /IM {data} /T")
+            else:
+                os.system(f"pkill -f {data}")
+            report = f"Процесс {data} успешно закрыт!"
+
+        elif action == "get_drives":
+            current_dir = ""
+            if platform.system() == "Windows":
+                import string
+                from ctypes import windll
+                drives = []
+                bitmask = windll.kernel32.GetLogicalDrives()
+                for letter in string.ascii_uppercase:
+                    if bitmask & 1:
+                        drives.append({"name": f"{letter}:\\", "is_dir": True})
+                    bitmask >>= 1
+                items = drives
+            else:
+                items = [{"name": "/", "is_dir": True}]
+            event_type = "explorer_ready"
+
+        elif action == "set_drive" or action == "cd_into":
+            current_dir = data if action == "set_drive" else os.path.join(current_dir, data)
+            items = []
+            if os.path.exists(current_dir):
+                for file in os.listdir(current_dir):
+                    f_path = os.path.join(current_dir, file)
+                    items.append({"name": file, "is_dir": os.path.isdir(f_path)})
+            event_type = "explorer_ready"
+
+        elif action == "cd_back":
+            current_dir = os.path.dirname(current_dir.rstrip(os.sep))
+            if not current_dir or current_dir == os.path.dirname(current_dir):
+                current_dir = ""
+                execute_command({"action": "get_drives", "data": ""})
+                return
+            items = []
+            for file in os.listdir(current_dir):
+                f_path = os.path.join(current_dir, file)
+                items.append({"name": file, "is_dir": os.path.isdir(f_path)})
+            event_type = "explorer_ready"
+
+        elif action == "run_app":
+            if data == "steam":
+                os.startfile("steam://") if platform.system() == "Windows" else subprocess.Popen(["steam"])
+            elif data == "discord":
+                subprocess.Popen(["discord"])
+            elif data == "browser":
+                import webbrowser
+                webbrowser.open("https://google.com")
+            report = f"Команда на запуск {data} выполнена."
+
+        elif action == "power":
+            if data == "restart":
+                os.system("shutdown /r /t 1" if platform.system() == "Windows" else "reboot")
+            elif data == "shutdown":
+                os.system("shutdown /s /t 1" if platform.system() == "Windows" else "poweroff")
+            report = f"Команда питания ({data}) отправлена на ОС."
+
+    except Exception as e:
+        report = f"Ошибка выполнения команды {action}: {e}"
+
+    payload = {"host_id": HOST_ID, "user_id": user_id, "current_dir": current_dir, "report": report}
+    if event_type:
+        payload["event_type"] = event_type
+        payload["items"] = items
         
-    if request.data:
-        temp = f"temp_{host_id}.jpg"
-        with open(temp, "wb") as f: f.write(request.data)
-        with open(temp, "rb") as ph: bot.send_photo(user_id, ph, caption=f"📸 Скриншот ПК: {host_id}")
-        os.remove(temp)
-        return "OK", 200
-    return "Error", 400
+    try: requests.post(f"{SERVER_URL}/poll", json=payload)
+    except: pass
+
+def network_loop():
+    global is_running, user_id
+    while is_running:
+        try:
+            res = requests.post(f"{SERVER_URL}/poll", json={
+                "host_id": HOST_ID, "user_id": user_id, "current_dir": current_dir
+            }).json()
+            
+            for cmd in res.get("commands", []):
+                execute_command(cmd)
+            
+            app.status_label.config(text="СТАТУС: ОНЛАЙН", fg=THEMES[current_theme]["status_on"])
+        except:
+            app.status_label.config(text="СТАТУС: ОШИБКА СЕТИ", fg=THEMES[current_theme]["status_off"])
+            
+        time.sleep(2)
+
+class DesktopAgentApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"PC Control Agent ({HOST_ID})")
+        self.root.geometry("400x350")
+        self.root.resizable(False, False)
+        
+        self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
+        self.icon = None
+        self.create_tray_icon()
+
+        self.welcome_label = tk.Label(root, text="ДОБРО ПОЖАЛОВАТЬ В PC AGENT", font=("Arial", 14, "bold"))
+        self.welcome_label.pack(pady=15)
+
+        self.id_label = tk.Label(root, text="Введите ваш Telegram ID (из бота):", font=("Arial", 10))
+        self.id_label.pack(pady=5)
+        self.id_entry = tk.Entry(root, font=("Arial", 12), justify="center", width=25)
+        self.id_entry.pack(pady=5)
+
+        saved_id = load_user_id()
+        if saved_id:
+            self.id_entry.insert(0, saved_id)
+
+        self.theme_label = tk.Label(root, text="Выбор темы оформления:", font=("Arial", 9))
+        self.theme_label.pack(pady=(10, 0))
+
+        self.theme_combo = ttk.Combobox(root, values=list(THEMES.keys()), state="readonly", width=15)
+        self.theme_combo.set(current_theme)
+        self.theme_combo.pack(pady=5)
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_theme(self.theme_combo.get()))
+
+        self.start_btn = tk.Button(root, text="Запустить Агент", font=("Arial", 11, "bold"), width=20, height=1, command=self.start_agent, relief="flat")
+        self.start_btn.pack(pady=10)
+
+        self.hide_btn = tk.Button(root, text="Свернуть в трей", font=("Arial", 9), width=20, command=self.hide_window)
+        self.hide_btn.pack(pady=2)
+
+        self.stop_btn = tk.Button(root, text="Остановить и Выйти", font=("Arial", 9), width=20, command=self.quit_app, bg="#d32f2f", fg="white")
+        self.stop_btn.pack(pady=2)
+
+        self.status_label = tk.Label(root, text="СТАТУС: ОТКЛЮЧЕН", font=("Arial", 10, "bold"))
+        self.status_label.pack(side="bottom", fill="x", pady=10)
+
+        self.apply_theme(current_theme)
+
+    def apply_theme(self, theme_name):
+        global current_theme
+        current_theme = theme_name
+        colors = THEMES[theme_name]
+        
+        self.root.config(bg=colors["bg"])
+        self.welcome_label.config(bg=colors["bg"], fg=colors["fg"])
+        self.id_label.config(bg=colors["bg"], fg=colors["fg"])
+        self.id_entry.config(bg=colors["entry_bg"], fg=colors["fg"], insertbackground=colors["fg"])
+        self.theme_label.config(bg=colors["bg"], fg=colors["fg"])
+        self.status_label.config(bg=colors["bg"])
+        self.hide_btn.config(bg=colors["btn_bg"], fg=colors["btn_fg"])
+        
+        if not is_running:
+            self.start_btn.config(bg=colors["btn_bg"], fg=colors["btn_fg"])
+            self.status_label.config(text="СТАТУС: ОТКЛЮЧЕН", fg=colors["status_off"])
+        else:
+            self.status_label.config(fg=colors["status_on"])
+
+    def create_tray_icon(self):
+        image = Image.new('RGB', (64, 64), color='white')
+        dc = ImageDraw.Draw(image)
+        dc.ellipse((8, 8, 56, 56), fill='#4CAF50')
+        
+        menu = (
+            item('Открыть окно', self.show_window),
+            item('Остановить и Выйти', self.quit_app)
+        )
+        self.icon = pystray.Icon("agent_icon", image, "PC Control Agent", menu)
+
+    def hide_window(self):
+        uid = self.id_entry.get().strip()
+        if not uid and not is_running:
+            messagebox.showwarning("Внимание", "Пожалуйста, введите и запустите Агент с вашим Telegram ID перед сворачиванием.")
+            return
+        self.root.withdraw()
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def show_window(self):
+        if self.icon:
+            self.icon.stop()
+        self.root.after(0, self.root.deiconify)
+
+    def start_agent(self):
+        global is_running, user_id
+        user_id = self.id_entry.get().strip()
+        if not user_id:
+            messagebox.showerror("Ошибка", "Введите ваш Telegram ID!")
+            return
+        
+        save_user_id(user_id)
+        
+        if not is_running:
+            is_running = True
+            self.start_btn.config(text="Агент запущен", bg="#4caf50", fg="white", state="disabled")
+            self.id_entry.config(state="disabled")
+            self.theme_combo.config(state="disabled")
+            self.status_label.config(text="СТАТУС: ЗАПУСК...", fg="#ff9800")
+            threading.Thread(target=network_loop, daemon=True).start()
+
+    def quit_app(self):
+        if messagebox.askyesno("Exit", "Вы действительно хотите полностью выключить агента?"):
+            global is_running
+            is_running = False
+            if self.icon:
+                self.icon.stop()
+            self.root.destroy()
+            sys.exit(0)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    root = tk.Tk()
+    app = DesktopAgentApp(root)
+    root.mainloop()
