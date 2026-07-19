@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gunicorn.error')
 
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # <--- ВСТАВЬ СВОЙ ТОКЕН
+BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  # <--- ВСТАВЬ СВОЙ ТОКЕН
 RENDER_URL = "https://tg-pc-server.onrender.com"  # <--- ВСТАВЬ URL БЕЗ /
 
 bot = telebot.TeleBot(BOT_TOKEN)
