@@ -7,12 +7,14 @@ from flask import Flask, request, jsonify
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gunicorn.error')
 
-BOT_TOKEN = "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34"  # <--- ВСТАВЬ СВОЙ ТОКЕН
-RENDER_URL = "https://tg-pc-server.onrender.com"  # <--- ВСТАВЬ URL БЕЗ /
+# Конфигурация (Рекомендуется использовать переменные окружения)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34")
+RENDER_URL = os.environ.get("RENDER_URL", "https://tg-pc-server.onrender.com")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
+# Хранилище данных в памяти
 hosts_db = {}
 commands_queue = {}
 user_ui_messages = {}
@@ -48,6 +50,17 @@ def handle_menu_commands(message):
         bot.send_message(user_id, "❌ Твой ПК не найден в сети.")
         return
 
+    # Выбор режима для Диспетчера Задач
+    if message.text == "⚙️ Диспетчер задач":
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("🖥 Открытые окна", callback_data="tasks_windowed"),
+            types.InlineKeyboardButton("⚙️ Фоновые процессы", callback_data="tasks_background")
+        )
+        msg = bot.send_message(user_id, "⚙️ *Диспетчер задач*\nКакие процессы показать?", reply_markup=markup, parse_mode="Markdown")
+        user_ui_messages[user_id] = msg.message_id
+        return
+
     status_msg = bot.send_message(user_id, "⏳ Запрос отправлен на ПК, ожидание данных...")
     user_ui_messages[user_id] = status_msg.message_id
 
@@ -55,8 +68,6 @@ def handle_menu_commands(message):
         commands_queue.setdefault(target_host, []).append({"action": "stream", "data": ""})
     elif message.text == "📁 Проводник (Диски)":
         commands_queue.setdefault(target_host, []).append({"action": "get_drives", "data": ""})
-    elif message.text == "⚙️ Диспетчер задач":
-        commands_queue.setdefault(target_host, []).append({"action": "get_tasks", "data": ""})
 
 @bot.message_handler(func=lambda message: message.text in ["🎮 Запуск программ", "🔌 Управление питанием"])
 def handle_submenu_commands(message):
@@ -90,11 +101,26 @@ def handle_callbacks(call):
 
     user_ui_messages[user_id] = call.message.message_id
 
-    if call.data.startswith("kill_task_"):
+    # Запрос процессов (Окна / Фон)
+    if call.data.startswith("tasks_") and call.data != "tasks_menu_back":
+        task_type = call.data.replace("tasks_", "")
+        commands_queue.setdefault(target_host, []).append({"action": "get_tasks", "data": task_type})
+        type_name = "оконных приложений" if task_type == "windowed" else "фоновых процессов"
+        bot.edit_message_text(f"⏳ Запрашиваю список {type_name}...", user_id, call.message.message_id)
+
+    elif call.data == "tasks_menu_back":
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("🖥 Открытые окна", callback_data="tasks_windowed"),
+            types.InlineKeyboardButton("⚙️ Фоновые процессы", callback_data="tasks_background")
+        )
+        bot.edit_message_text("⚙️ *Диспетчер задач*\nКакие процессы показать?", user_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data.startswith("kill_task_"):
         task_name = call.data.replace("kill_task_", "")
         commands_queue.setdefault(target_host, []).append({"action": "kill_task", "data": task_name})
         bot.answer_callback_query(call.id, f"Убиваю процесс {task_name}...")
-        bot.edit_message_text("⏳ Запрос на закрытие процесса отправлен, обновляю список...", user_id, call.message.message_id)
+        bot.edit_message_text(f"⏳ Запрос на закрытие процесса `{task_name}` отправлен...", user_id, call.message.message_id, parse_mode="Markdown")
         
     elif call.data.startswith("explore_drive_"):
         drive = call.data.replace("explore_drive_", "")
@@ -135,7 +161,7 @@ def telegram_webhook():
 def index():
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
-    return "<h1>Сервер и Редактируемый Вебхук Активны!</h1>", 200
+    return "<h1>Сервер и Вебхук Активны!</h1>", 200
 
 @app.route('/poll', methods=['POST'])
 def poll():
@@ -153,11 +179,14 @@ def poll():
         markup = types.InlineKeyboardMarkup(row_width=1)
         tasks = data.get("items", [])
         
-        text = "⚙️ *Диспетчер задач*\nНажми кнопку, чтобы принудительно закрыть процесс:\n\n"
+        text = "⚙️ *Список процессов:*\nНажми кнопку, чтобы завершить:\n\n"
         for task in tasks[:15]:
-            text += f"• `{task['name']}`\n"
+            display_name = task.get("display", task["name"])
+            text += f"• `{display_name}`\n"
             markup.add(types.InlineKeyboardButton(f"❌ Закрыть {task['name']}", callback_data=f"kill_task_{task['name']}"))
             
+        markup.add(types.InlineKeyboardButton("⬅️ Назад к выбору", callback_data="tasks_menu_back"))
+
         if ui_msg_id:
             try: bot.edit_message_text(text, user_id, ui_msg_id, reply_markup=markup, parse_mode="Markdown")
             except: bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -187,7 +216,7 @@ def poll():
             bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
 
     elif data.get("report"):
-        text = f"✅ `{host_id}`: {data['report']}"
+        text = f"💬 `{host_id}`: {data['report']}"
         if ui_msg_id:
             try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
             except: bot.send_message(user_id, text, parse_mode="Markdown")
@@ -211,10 +240,11 @@ def upload_screenshot():
         temp = f"temp_{host_id}.jpg"
         with open(temp, "wb") as f: f.write(request.data)
         with open(temp, "rb") as ph: bot.send_photo(user_id, ph, caption=f"📸 Скриншот ПК: {host_id}")
-        os.remove(temp)
+        if os.path.exists(temp):
+            os.remove(temp)
         return "OK", 200
     return "Error", 400
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=False)
+    app.run(host="0.0.0.0", port=port, threaded=True)
