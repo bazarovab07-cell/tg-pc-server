@@ -1,4 +1,6 @@
 import os
+import io
+import time
 import logging
 import telebot
 from telebot import types
@@ -7,14 +9,13 @@ from flask import Flask, request, jsonify
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gunicorn.error')
 
-# Конфигурация (Рекомендуется использовать переменные окружения)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8889355917:AAEPQcy1eLySvKBQgkOM23tANZoIpR3VU34")
 RENDER_URL = os.environ.get("RENDER_URL", "https://tg-pc-server.onrender.com")
+EXE_FILE = "agent.exe"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Хранилище данных в памяти
 hosts_db = {}
 commands_queue = {}
 user_ui_messages = {}
@@ -28,18 +29,45 @@ def get_main_keyboard():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "Привет! Бот готов к работе.", reply_markup=get_main_keyboard())
+    user_id = str(message.chat.id)
+    
+    welcome_text = (
+        f"👋 *Добро пожаловать в панель управления ПК!*\n\n"
+        f"Твой личный Telegram ID: `{user_id}`\n"
+        f"*(нажми на число выше, чтобы скопировать его в буфер)*\n\n"
+        f"📋 *Быстрый старт:*\n"
+        f"1. Скачай прикрепленный файл `agent.exe` ниже.\n"
+        f"2. Запусти его на своем компьютере.\n"
+        f"3. Вставь скопированный ID в поле ввода и нажми «Запустить Агент».\n"
+        f"4. Программа автоматически свернется в системный трей."
+    )
+    
+    bot.send_message(user_id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+    if os.path.exists(EXE_FILE):
+        try:
+            with open(EXE_FILE, "rb") as exe_data:
+                bot.send_document(user_id, exe_data, caption="💻 Клиентский агент для твоего ПК")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке agent.exe: {e}")
+            bot.send_message(user_id, "⚠️ Не удалось отправить файл агента.")
+    else:
+        bot.send_message(
+            user_id,
+            "ℹ️ Файл `agent.exe` еще не загружен в репозиторий сервера. Соберите его на ПК и загрузите рядом с `server.py`.",
+            parse_mode="Markdown"
+        )
 
 @bot.message_handler(func=lambda message: message.text == "🖥️ Статус ПК")
 def bot_status(message):
     user_id = str(message.chat.id)
-    text = "*Твои устройства:*\n\n"
+    text = "*Подключенные устройства:*\n\n"
     found = False
     for hid, info in hosts_db.items():
         if info.get("user_id") == user_id:
-            text += f"● `{hid}` — Онлайн\n"
+            text += f"● `{hid}` — Онлайн ✅\n"
             found = True
-    bot.send_message(user_id, text if found else "❌ Нет активных подключений.", parse_mode="Markdown")
+    bot.send_message(user_id, text if found else "❌ Нет активных подключений. Запустите агент на ПК.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text in ["📸 Сделать скриншот", "📁 Проводник (Диски)", "⚙️ Диспетчер задач"])
 def handle_menu_commands(message):
@@ -47,10 +75,9 @@ def handle_menu_commands(message):
     target_host = next((hid for hid, info in hosts_db.items() if info.get("user_id") == user_id), None)
     
     if not target_host:
-        bot.send_message(user_id, "❌ Твой ПК не найден в сети.")
+        bot.send_message(user_id, "❌ Твой ПК не подключен к сети.")
         return
 
-    # Выбор режима для Диспетчера Задач
     if message.text == "⚙️ Диспетчер задач":
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -61,7 +88,7 @@ def handle_menu_commands(message):
         user_ui_messages[user_id] = msg.message_id
         return
 
-    status_msg = bot.send_message(user_id, "⏳ Запрос отправлен на ПК, ожидание данных...")
+    status_msg = bot.send_message(user_id, "⏳ Выполняю запрос на ПК...")
     user_ui_messages[user_id] = status_msg.message_id
 
     if message.text == "📸 Сделать скриншот":
@@ -75,7 +102,7 @@ def handle_submenu_commands(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if message.text == "🎮 Запуск программ":
-        text = "🎮 *Запуск программ:*"
+        text = "🎮 *Быстрый запуск:*"
         markup.add(
             types.InlineKeyboardButton("Steam", callback_data="run_app_steam"),
             types.InlineKeyboardButton("Discord", callback_data="run_app_discord"),
@@ -84,8 +111,8 @@ def handle_submenu_commands(message):
     else:
         text = "🔌 *Управление питанием:*"
         markup.add(
-            types.InlineKeyboardButton("Перезагрузка", callback_data="power_restart"),
-            types.InlineKeyboardButton("Выключение", callback_data="power_shutdown")
+            types.InlineKeyboardButton("🔄 Перезагрузка", callback_data="power_restart"),
+            types.InlineKeyboardButton("🛑 Выключение", callback_data="power_shutdown")
         )
         
     bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -96,17 +123,16 @@ def handle_callbacks(call):
     target_host = next((hid for hid, info in hosts_db.items() if info.get("user_id") == user_id), None)
     
     if not target_host:
-        bot.answer_callback_query(call.id, "❌ ПК не найден.")
+        bot.answer_callback_query(call.id, "❌ ПК отключен.")
         return
 
     user_ui_messages[user_id] = call.message.message_id
 
-    # Запрос процессов (Окна / Фон)
     if call.data.startswith("tasks_") and call.data != "tasks_menu_back":
         task_type = call.data.replace("tasks_", "")
         commands_queue.setdefault(target_host, []).append({"action": "get_tasks", "data": task_type})
-        type_name = "оконных приложений" if task_type == "windowed" else "фоновых процессов"
-        bot.edit_message_text(f"⏳ Запрашиваю список {type_name}...", user_id, call.message.message_id)
+        type_name = "оконных программ" if task_type == "windowed" else "фоновых служб"
+        bot.edit_message_text(f"⏳ Сбор данных {type_name}...", user_id, call.message.message_id)
 
     elif call.data == "tasks_menu_back":
         markup = types.InlineKeyboardMarkup()
@@ -119,22 +145,22 @@ def handle_callbacks(call):
     elif call.data.startswith("kill_task_"):
         task_name = call.data.replace("kill_task_", "")
         commands_queue.setdefault(target_host, []).append({"action": "kill_task", "data": task_name})
-        bot.answer_callback_query(call.id, f"Убиваю процесс {task_name}...")
-        bot.edit_message_text(f"⏳ Запрос на закрытие процесса `{task_name}` отправлен...", user_id, call.message.message_id, parse_mode="Markdown")
+        bot.answer_callback_query(call.id, f"Закрытие {task_name}...")
+        bot.edit_message_text(f"⏳ Закрываю `{task_name}`...", user_id, call.message.message_id, parse_mode="Markdown")
         
     elif call.data.startswith("explore_drive_"):
         drive = call.data.replace("explore_drive_", "")
         commands_queue.setdefault(target_host, []).append({"action": "set_drive", "data": drive})
-        bot.edit_message_text(f"⏳ Заходим в диск {drive}...", user_id, call.message.message_id)
+        bot.edit_message_text(f"⏳ Чтение диска {drive}...", user_id, call.message.message_id)
         
     elif call.data.startswith("explore_cd_"):
         folder = call.data.replace("explore_cd_", "")
         commands_queue.setdefault(target_host, []).append({"action": "cd_into", "data": folder})
-        bot.edit_message_text(f"⏳ Открываем папку {folder}...", user_id, call.message.message_id)
+        bot.edit_message_text(f"⏳ Открытие `{folder}`...", user_id, call.message.message_id, parse_mode="Markdown")
         
     elif call.data == "explore_back_":
         commands_queue.setdefault(target_host, []).append({"action": "cd_back", "data": ""})
-        bot.edit_message_text("⏳ Возвращаемся назад...", user_id, call.message.message_id)
+        bot.edit_message_text("⏳ Переход назад...", user_id, call.message.message_id)
 
     elif call.data.startswith("run_app_"):
         app_name = call.data.replace("run_app_", "")
@@ -144,7 +170,7 @@ def handle_callbacks(call):
     elif call.data.startswith("power_"):
         action = call.data.replace("power_", "")
         commands_queue.setdefault(target_host, []).append({"action": "power", "data": action})
-        bot.answer_callback_query(call.id, f"Отправлена команда: {action}")
+        bot.answer_callback_query(call.id, f"Команда питания отправлена: {action}")
         
     bot.answer_callback_query(call.id)
 
@@ -161,7 +187,7 @@ def telegram_webhook():
 def index():
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
-    return "<h1>Сервер и Вебхук Активны!</h1>", 200
+    return "<h1>Сервер управления ПК активен!</h1>", 200
 
 @app.route('/poll', methods=['POST'])
 def poll():
@@ -172,14 +198,14 @@ def poll():
     if not host_id or not user_id: 
         return jsonify({"error": "Missing params"}), 400
     
-    hosts_db[host_id] = {"user_id": user_id, "status": "online"}
+    hosts_db[host_id] = {"user_id": user_id, "status": "online", "last_seen": time.time()}
     ui_msg_id = user_ui_messages.get(user_id)
 
     if data.get("event_type") == "tasks_ready":
         markup = types.InlineKeyboardMarkup(row_width=1)
         tasks = data.get("items", [])
         
-        text = "⚙️ *Список процессов:*\nНажми кнопку, чтобы завершить:\n\n"
+        text = "⚙️ *Список процессов:*\nНажмите кнопку для завершения:\n\n"
         for task in tasks[:15]:
             display_name = task.get("display", task["name"])
             text += f"• `{display_name}`\n"
@@ -232,16 +258,15 @@ def upload_screenshot():
     host_id = request.args.get("host_id")
     user_id = request.args.get("user_id")
     ui_msg_id = user_ui_messages.get(user_id)
+    
     if ui_msg_id:
         try: bot.delete_message(user_id, ui_msg_id)
         except: pass
         
     if request.data:
-        temp = f"temp_{host_id}.jpg"
-        with open(temp, "wb") as f: f.write(request.data)
-        with open(temp, "rb") as ph: bot.send_photo(user_id, ph, caption=f"📸 Скриншот ПК: {host_id}")
-        if os.path.exists(temp):
-            os.remove(temp)
+        image_stream = io.BytesIO(request.data)
+        image_stream.name = f"screenshot_{host_id}.jpg"
+        bot.send_photo(user_id, image_stream, caption=f"📸 Скриншот: `{host_id}`", parse_mode="Markdown")
         return "OK", 200
     return "Error", 400
 
