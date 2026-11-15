@@ -3,6 +3,7 @@ import io
 import time
 import logging
 import re
+import threading
 import telebot
 from telebot import types
 from flask import Flask, request, jsonify
@@ -33,6 +34,16 @@ app = Flask(__name__)
 hosts_db = {}
 commands_queue = {}
 user_ui_messages = {}
+
+def delete_message_after(chat_id, message_id, delay=3.0):
+    """Удаляет временное сервисное сообщение через delay секунд."""
+    def _delete():
+        time.sleep(delay)
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+    threading.Thread(target=_delete, daemon=True).start()
 
 # --- Вспомогательные функции безопасности ---
 
@@ -221,7 +232,9 @@ if bot:
             return
 
         data = call.data
-        user_ui_messages[user_id] = call.message.message_id
+        # Сохраняем ID сообщения только для проводника и диспетчера задач (где обновляется внутреннее содержимое меню)
+        if data.startswith("tasks_") or data.startswith("explore_") or data.startswith("kill_task_"):
+            user_ui_messages[user_id] = call.message.message_id
 
         # 1. Диспетчер задач
         if data.startswith("tasks_") and data != "tasks_menu_back":
@@ -263,30 +276,38 @@ if bot:
         elif data.startswith("vol_"):
             vol_act = data.replace("vol_", "")
             add_command(target_host, "volume", vol_act)
-            bot.answer_callback_query(call.id, f"Звук: {vol_act}")
+            vol_labels = {
+                "up": "🔊 Громкость +6%",
+                "down": "🔉 Громкость -6%",
+                "mute": "🔇 Звук переключен",
+                "play_pause": "⏯️ Пауза / Воспроизведение",
+                "next": "⏭️ Следующий трек",
+                "prev": "⏮️ Предыдущий трек"
+            }
+            bot.answer_callback_query(call.id, vol_labels.get(vol_act, f"Медиа: {vol_act}"))
 
         # 4. Запуск программ
         elif data.startswith("app_"):
             app_name = data.replace("app_", "")
             add_command(target_host, "run_app", app_name)
-            bot.answer_callback_query(call.id, f"Запуск: {app_name}")
+            bot.answer_callback_query(call.id, f"🚀 Запуск: {app_name}")
 
         # 5. Быстрые действия
         elif data == "act_lock":
             add_command(target_host, "quick_action", "lock")
-            bot.answer_callback_query(call.id, "Блокировка экрана...")
+            bot.answer_callback_query(call.id, "🔒 Блокировка экрана...")
         elif data == "act_minimize_all":
             add_command(target_host, "quick_action", "minimize_all")
-            bot.answer_callback_query(call.id, "Сворачивание окон...")
+            bot.answer_callback_query(call.id, "🪟 Сворачивание окон...")
         elif data == "act_clip_get":
             add_command(target_host, "quick_action", "clipboard_get")
-            bot.answer_callback_query(call.id, "Чтение буфера обмена...")
+            bot.answer_callback_query(call.id, "📋 Чтение буфера обмена...")
 
         # 6. Питание
         elif data.startswith("pow_"):
             pow_act = data.replace("pow_", "")
             add_command(target_host, "power", pow_act)
-            bot.answer_callback_query(call.id, f"Питание: {pow_act}")
+            bot.answer_callback_query(call.id, f"🔌 Питание: {pow_act}")
 
         bot.answer_callback_query(call.id)
 
@@ -411,12 +432,24 @@ def poll():
     # 4. Текстовые отчеты
     elif data.get("report") and bot:
         safe_report = str(data['report'])[:350]
-        text = f"💬 `{host_id}`:\n{safe_report}"
-        if ui_msg_id:
-            try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
-            except: bot.send_message(user_id, text, parse_mode="Markdown")
+        # Для звука, медиа, запуска программ и быстрых действий отправляем статус отдельным сообщением и удаляем через 3 секунды
+        is_transient = any(k in safe_report.lower() for k in [
+            "громкость", "звук", "медиа", "трек", "запущено", "запущен", "заблокирован", "свернуты", "буфер"
+        ])
+        
+        if is_transient:
+            try:
+                temp_msg = bot.send_message(user_id, f"💬 `{host_id}`:\n{safe_report}", parse_mode="Markdown")
+                delete_message_after(user_id, temp_msg.message_id, delay=3.0)
+            except Exception as e:
+                logger.error(f"Ошибка отправки временного отчета: {e}")
         else:
-            bot.send_message(user_id, text, parse_mode="Markdown")
+            text = f"💬 `{host_id}`:\n{safe_report}"
+            if ui_msg_id:
+                try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
+                except: bot.send_message(user_id, text, parse_mode="Markdown")
+            else:
+                bot.send_message(user_id, text, parse_mode="Markdown")
 
     cmds = commands_queue.get(host_id, [])
     commands_queue[host_id] = []
