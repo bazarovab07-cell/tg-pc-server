@@ -1,0 +1,310 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        packages: 'platforms;android-34 build-tools;34.0.0'
+
+    - name: Set up Gradle 8.5
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.5"
+
+    - name: Create Android Project
+      run: |
+        mkdir -p android_app/app/src/main/java/com/tgpc/ecosystem
+        mkdir -p android_app/app/src/main/res/values
+        mkdir -p android_app/app/src/main/res/drawable
+
+        cat << 'EOF' > android_app/settings.gradle
+        rootProject.name = "TG_PC_Ecosystem"
+        include ':app'
+        EOF
+
+        cat << 'EOF' > android_app/build.gradle
+        buildscript {
+            repositories {
+                google()
+                mavenCentral()
+            }
+            dependencies {
+                classpath 'com.android.tools.build:gradle:8.2.2'
+            }
+        }
+        allprojects {
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        EOF
+
+        cat << 'EOF' > android_app/gradle.properties
+        org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+        android.useAndroidX=true
+        EOF
+
+        cat << 'EOF' > android_app/app/build.gradle
+        plugins {
+            id 'com.android.application'
+        }
+        android {
+            namespace 'com.tgpc.ecosystem'
+            compileSdk 34
+            defaultConfig {
+                applicationId "com.tgpc.ecosystem"
+                minSdk 24
+                targetSdk 34
+                versionCode 1
+                versionName "1.0.0"
+            }
+            buildTypes {
+                release {
+                    minifyEnabled false
+                }
+            }
+            compileOptions {
+                sourceCompatibility JavaVersion.VERSION_1_8
+                targetCompatibility JavaVersion.VERSION_1_8
+            }
+        }
+        dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'com.google.android.material:material:1.11.0'
+            implementation 'androidx.webkit:webkit:1.10.0'
+        }
+        EOF
+
+        cat << 'EOF' > android_app/app/src/main/res/values/styles.xml
+        <resources>
+            <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+                <item name="android:windowBackground">#0b0f19</item>
+                <item name="android:statusBarColor">#0b0f19</item>
+                <item name="android:navigationBarColor">#0b0f19</item>
+            </style>
+        </resources>
+        EOF
+
+        cat << 'EOF' > android_app/app/src/main/res/drawable/ic_launcher.xml
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+            <path
+                android:fillColor="#0b0f19"
+                android:pathData="M0,0h108v108h-108z"/>
+            <path
+                android:fillColor="#00e5ff"
+                android:pathData="M24,24h60v44h-60zM44,68h20v12h-20zM36,80h36v4h-36z"/>
+        </vector>
+        EOF
+
+        cat << 'EOF' > android_app/app/src/main/AndroidManifest.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+            package="com.tgpc.ecosystem">
+
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.VIBRATE" />
+
+            <application
+                android:allowBackup="true"
+                android:icon="@drawable/ic_launcher"
+                android:label="TG-PC Ecosystem"
+                android:roundIcon="@drawable/ic_launcher"
+                android:supportsRtl="true"
+                android:theme="@style/AppTheme"
+                android:usesCleartextTraffic="true"
+                android:hardwareAccelerated="true">
+
+                <activity
+                    android:name=".MainActivity"
+                    android:exported="true"
+                    android:configChanges="orientation|screenSize|keyboardHidden"
+                    android:windowSoftInputMode="adjustResize">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+            </application>
+        </manifest>
+        EOF
+
+        cat << 'EOF' > android_app/app/src/main/java/com/tgpc/ecosystem/MainActivity.java
+        package com.tgpc.ecosystem;
+
+        import android.annotation.SuppressLint;
+        import android.app.Activity;
+        import android.content.Intent;
+        import android.net.Uri;
+        import android.os.Bundle;
+        import android.view.View;
+        import android.webkit.ValueCallback;
+        import android.webkit.WebChromeClient;
+        import android.webkit.WebResourceRequest;
+        import android.webkit.WebSettings;
+        import android.webkit.WebView;
+        import android.webkit.WebViewClient;
+        import androidx.annotation.Nullable;
+        import androidx.appcompat.app.AppCompatActivity;
+
+        public class MainActivity extends AppCompatActivity {
+            private WebView webView;
+            private ValueCallback<Uri[]> uploadMessage;
+            private final static int FILECHOOSER_RESULTCODE = 101;
+            private static final String APP_URL = "https://tg-pc-server.onrender.com";
+
+            @SuppressLint("SetJavaScriptEnabled")
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+                super.onCreate(savedInstanceState);
+
+                getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                );
+
+                webView = new WebView(this);
+                setContentView(webView);
+
+                WebSettings settings = webView.getSettings();
+                settings.setJavaScriptEnabled(true);
+                settings.setDomStorageEnabled(true);
+                settings.setDatabaseEnabled(true);
+                settings.setAllowFileAccess(true);
+                settings.setAllowContentAccess(true);
+                settings.setSupportZoom(false);
+                settings.setBuiltInZoomControls(false);
+                settings.setUseWideViewPort(true);
+                settings.setLoadWithOverviewMode(true);
+                settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+                settings.setUserAgentString(settings.getUserAgentString() + " TG_PC_Android_App/1.0");
+
+                webView.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                        String url = request.getUrl().toString();
+                        if (url.startsWith("https://tg-pc-server.onrender.com") || url.startsWith("http://") || url.startsWith("https://")) {
+                            return false;
+                        }
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                            startActivity(intent);
+                            return true;
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    }
+                });
+
+                webView.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
+                                                     FileChooserParams fileChooserParams) {
+                        if (uploadMessage != null) {
+                            uploadMessage.onReceiveValue(null);
+                            uploadMessage = null;
+                        }
+                        uploadMessage = filePathCallback;
+
+                        Intent intent = fileChooserParams.createIntent();
+                        try {
+                            startActivityForResult(intent, FILECHOOSER_RESULTCODE);
+                        } catch (Exception e) {
+                            uploadMessage = null;
+                            return false;
+                        }
+                        return true;
+                    }
+                });
+
+                webView.loadUrl(APP_URL);
+            }
+
+            @Override
+            protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+                super.onActivityResult(requestCode, resultCode, data);
+                if (requestCode == FILECHOOSER_RESULTCODE) {
+                    if (uploadMessage == null) return;
+                    Uri[] results = null;
+                    if (resultCode == Activity.RESULT_OK && data != null) {
+                        String dataString = data.getDataString();
+                        if (dataString != null) {
+                            results = new Uri[]{Uri.parse(dataString)};
+                        } else if (data.getClipData() != null) {
+                            final int numSelectedFiles = data.getClipData().getItemCount();
+                            results = new Uri[numSelectedFiles];
+                            for (int i = 0; i < numSelectedFiles; i++) {
+                                results[i] = data.getClipData().getItemAt(i).getUri();
+                            }
+                        }
+                    }
+                    uploadMessage.onReceiveValue(results);
+                    uploadMessage = null;
+                }
+            }
+
+            @Override
+            public void onBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack();
+                } else {
+                    super.onBackPressed();
+                }
+            }
+        }
+        EOF
+
+    - name: Build Debug APK
+      run: |
+        cd android_app
+        gradle assembleDebug --stacktrace
+        cp app/build/outputs/apk/debug/app-debug.apk ../TG_PC_Ecosystem.apk
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: TG_PC_Ecosystem_APK
+        path: TG_PC_Ecosystem.apk
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0-apk
+        name: "TG-PC Mobile Ecosystem Android APK v1.0"
+        body: "📱 Android APK для управления компьютером из любого города. Скачай TG_PC_Ecosystem.apk и установи на телефон."
+        files: TG_PC_Ecosystem.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Send APK to Telegram
+      run: |
+        curl -v -F chat_id="7779752480" \
+             -F document=@TG_PC_Ecosystem.apk \
+             -F caption="📱 Твое Android приложение (APK) готово! Нажми на файл, чтобы скачать и установить на телефон." \
+             https://api.telegram.org/bot8889355917:AAFMeKe5nUJbLtDXA944qDc01OIB7iFe2NU/sendDocument
