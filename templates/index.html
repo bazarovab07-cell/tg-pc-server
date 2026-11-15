@@ -1,0 +1,594 @@
+<!DOCTYPE html><body>
+  <header class="top-bar">
+    <div class="brand"><span class="brand-logo">⚡ ECOSYSTEM</span></div>
+    <div class="status-badge"><span class="status-dot" id="statusDot"></span><span id="hostName">Ожидание...</span></div>
+  </header>
+
+  <div class="toast" id="toast"><span id="toastIcon">✨</span><span id="toastMsg">Готово</span></div>
+
+  <main class="view-container">
+    <!-- 1. Главная (Dashboard) -->
+    <section class="view-page active" id="viewDashboard">
+      <div class="card media-card">
+        <div class="track-info">
+          <div class="track-art" id="mediaArt">🎵</div>
+          <div class="track-details">
+            <div class="track-title" id="trackTitle">Ничего не играет</div>
+            <div class="track-status" id="trackStatus">Медиаплеер Windows</div>
+          </div>
+        </div>
+        <div class="media-buttons">
+          <button class="btn btn-circle" onclick="sendCmd('volume', 'prev')">⏮️</button>
+          <button class="btn btn-circle large btn-primary" onclick="sendCmd('volume', 'play_pause')">⏯️</button>
+          <button class="btn btn-circle" onclick="sendCmd('volume', 'next')">⏭️</button>
+          <button class="btn btn-circle" onclick="sendCmd('volume', 'down')">🔉</button>
+          <button class="btn btn-circle" onclick="sendCmd('volume', 'up')">🔊</button>
+          <button class="btn btn-circle" onclick="sendCmd('volume', 'mute')">🔇</button>
+        </div>
+      </div>
+
+      <!-- Аудиовыход и Звук -->
+      <div class="card">
+        <div class="card-title"><span>🔊 Устройство аудиовывода</span><button class="btn" style="padding:4px 10px; font-size:11px;" onclick="loadAudioDevices()">🔄 Обновить</button></div>
+        <select id="audioDeviceSelect" onchange="changeAudioDevice(this.value)" style="width:100%; background:rgba(255,255,255,0.05); border:1px solid var(--border-color); border-radius:10px; padding:12px; color:#fff; font-size:14px; outline:none; cursor:pointer;">
+          <option value="">Поиск аудиоустройств...</option>
+        </select>
+      </div>
+
+      <!-- Микшер громкости приложений -->
+      <div class="card">
+        <div class="card-title"><span>🎚️ Микшер приложений</span><button class="btn" style="padding:4px 10px; font-size:11px;" onclick="loadAppVolumes()">🔄 Обновить</button></div>
+        <div id="appMixerList">
+          <div style="text-align:center; padding:12px; color:var(--text-muted); font-size:12px;">Ожидание активных приложений со звуком...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span>📊 Состояние компьютера</span><span id="uptimeText" style="font-weight:400; text-transform:none;">--:--</span></div>
+        <div class="metric-grid">
+          <div class="metric-box">
+            <div class="metric-label">Оперативная память</div>
+            <div class="metric-value" id="ramValue">0%</div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="ramProgress"></div></div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Пинг с сервером</div>
+            <div class="metric-value" id="pingValue">-- мс</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⚡ Быстрое управление</div>
+        <div class="action-grid">
+          <div class="action-btn" onclick="sendCmd('quick_action', 'lock')"><span class="action-icon">🔒</span><span>Блок экрана</span></div>
+          <div class="action-btn" onclick="sendCmd('quick_action', 'minimize_all')"><span class="action-icon">🪟</span><span>Свернуть</span></div>
+          <div class="action-btn" onclick="fetchScreenshot()"><span class="action-icon">📸</span><span>Скриншот</span></div>
+          <div class="action-btn" onclick="sendCmd('run_app', 'steam')"><span class="action-icon">🎮</span><span>Steam</span></div>
+          <div class="action-btn" onclick="sendCmd('run_app', 'browser')"><span class="action-icon">🌐</span><span>Браузер</span></div>
+          <a href="https://github.com/bazarovab07-cell/tg-pc-server/releases/download/v1.0-apk/TG_PC_Ecosystem.apk" class="action-btn" style="text-decoration:none;"><span class="action-icon">📱</span><span>Скачать APK</span></a>
+          <div class="action-btn" onclick="sendCmd('power', 'sleep')"><span class="action-icon">💤</span><span>Сон</span></div>
+        </div>
+      </div>
+
+      <div class="card" id="screenCard" style="display:none;">
+        <div class="card-title"><span>📸 Экран ПК</span><button class="btn" style="padding:4px 10px; font-size:11px;" onclick="fetchScreenshot()">Обновить</button></div>
+        <img id="screenImg" src="" style="width:100%; border-radius:10px; border:1px solid var(--border-color); display:block;" alt="Экран">
+      </div>
+    </section>
+
+    <!-- 2. AirSwipe -->
+    <section class="view-page" id="viewAirSwipe">
+      <div class="airswipe-container">
+        <input type="file" id="airFileInput" style="display: none;" onchange="handleFileSelect(event)">
+        <div class="airswipe-card" id="airCard" onclick="triggerFilePicker()">
+          <div class="airswipe-icon-box" id="airIcon">🚀</div>
+          <div class="airswipe-title" id="airCardTitle">AirSwipe на ПК</div>
+          <div class="airswipe-desc" id="airCardDesc">Нажмите, чтобы выбрать файл, затем <b>смахните вверх</b> для мгновенной отправки на компьютер!</div>
+          <div class="swipe-indicator" id="swipeInd" style="display:none;"><span>▲ СВАЙП ВВЕРХ ДЛЯ ОТПРАВКИ ▲</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Тачпад -->
+    <section class="view-page" id="viewTouchpad">
+      <div class="card">
+        <div class="card-title">🖱️ Виртуальный тачпад</div>
+        <div class="touchpad-surface" id="touchpad">
+          <span>Водите пальцем здесь для движения мыши ПК</span>
+          <span style="font-size:11px; margin-top:6px; opacity:0.7;">Тап = ЛКМ | Удержание = ПКМ</span>
+        </div>
+        <div class="touchpad-buttons">
+          <button class="btn btn-full" onclick="sendCmd('mouse_click', 'left')">ЛКМ</button>
+          <button class="btn btn-full" onclick="sendCmd('mouse_click', 'right')">ПКМ</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">⌨️ Ввод текста на ПК</div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="typeInput" placeholder="Напишите текст..." style="flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--border-color); border-radius:10px; padding:10px 14px; color:#fff; font-size:14px; outline:none;">
+          <button class="btn btn-primary" onclick="sendTypedText()">Отправить</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. Окна -->
+    <section class="view-page" id="viewTasks">
+      <div class="card">
+        <div class="card-title"><span>🖥️ Открытые приложения</span><button class="btn" style="padding:4px 10px; font-size:11px;" onclick="loadTasks()">🔄 Обновить</button></div>
+        <div id="tasksList"><div style="text-align:center; padding:20px; color:var(--text-muted);">Загрузка окон...</div></div>
+      </div>
+    </section>
+
+    <!-- 5. Темы -->
+    <section class="view-page" id="viewSettings">
+      <div class="card">
+        <div class="card-title">🎨 Выбор оформления (Темы)</div>
+        <div class="theme-grid">
+          <div class="theme-btn active" onclick="setTheme('default', this)"><span class="theme-color-preview" style="background:#3b82f6;"></span><span>Cyber Blue</span></div>
+          <div class="theme-btn" onclick="setTheme('purple', this)"><span class="theme-color-preview" style="background:#a855f7;"></span><span>Synthwave</span></div>
+          <div class="theme-btn" onclick="setTheme('matrix', this)"><span class="theme-color-preview" style="background:#22c55e;"></span><span>Matrix Green</span></div>
+          <div class="theme-btn" onclick="setTheme('amber', this)"><span class="theme-color-preview" style="background:#f59e0b;"></span><span>Sunset Gold</span></div>
+          <div class="theme-btn" onclick="setTheme('crimson', this)"><span class="theme-color-preview" style="background:#f43f5e;"></span><span>Crimson Red</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">🖥️ Подключение к компьютеру</div>
+        <div id="discoveredPcCard" style="background:rgba(255,255,255,0.04); border:1px solid var(--border-color); border-radius:12px; padding:14px; margin-bottom:12px; display:flex; align-items:center; justify-content:space-between;">
+          <div>
+            <div style="font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px;">
+              <span class="status-dot online"></span>
+              <span id="detectedPcName">Автопоиск ПК...</span>
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:3px;" id="detectedPcStatus">Поиск активного ПК в сети...</div>
+          </div>
+          <button class="btn btn-primary" style="padding:6px 14px; font-size:12px;" onclick="autoConnectPc()">Подключить</button>
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="font-size:12px; color:var(--text-muted); display:block; margin-bottom:6px;">Имя ПК или код (по умолчанию авто):</label>
+          <input type="text" id="userIdInput" placeholder="Имя ПК (например DESKTOP-1OOL38E)" style="width:100%; background:rgba(255,255,255,0.05); border:1px solid var(--border-color); border-radius:10px; padding:12px 14px; color:#fff; font-size:14px; font-weight:600; outline:none;">
+        </div>
+        <button class="btn btn-primary btn-full" onclick="saveUserId()">Сохранить компьютер</button>
+      </div>
+      <div class="card" style="text-align:center;">
+        <div class="card-title" style="justify-content:center;">📦 Загрузка приложений экосистемы</div>
+        <p style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">Скачайте приложения для телефона и компьютера:</p>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <a href="https://github.com/bazarovab07-cell/tg-pc-server/releases/download/v1.0-apk/TG_PC_Ecosystem.apk" class="btn btn-primary btn-full" style="text-decoration:none; display:inline-flex;">📱 Скачать на телефон (Android APK)</a>
+          <a href="https://github.com/bazarovab07-cell/tg-pc-server/raw/main/agent.exe" class="btn btn-full" style="text-decoration:none; display:inline-flex;">💻 Скачать на компьютер (agent.exe)</a>
+        </div>
+      </div>
+      <div class="card" style="text-align:center; color:var(--text-muted); font-size:12px;">
+        <p>⚡ <b>PC Ecosystem Mobile v2.5</b></p>
+        <p style="margin-top:4px;">Управляйте компьютером из любого города мира.</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <div class="nav-item active" onclick="switchTab('viewDashboard', this)"><span class="nav-icon">📊</span><span>Главная</span></div>
+    <div class="nav-item" onclick="switchTab('viewAirSwipe', this)"><span class="nav-icon">🚀</span><span>AirSwipe</span></div>
+    <div class="nav-item" onclick="switchTab('viewTouchpad', this)"><span class="nav-icon">🖱️</span><span>Тачпад</span></div>
+    <div class="nav-item" onclick="switchTab('viewTasks', this)"><span class="nav-icon">🖥️</span><span>Окна</span></div>
+    <div class="nav-item" onclick="switchTab('viewSettings', this)"><span class="nav-icon">⚙️</span><span>Темы</span></div>
+  </nav>
+
+  <script>
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) { tg.expand(); tg.ready(); }
+
+    let userId = localStorage.getItem('pc_user_id') || '';
+    if (!userId && tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+      userId = String(tg.initDataUnsafe.user.id);
+      localStorage.setItem('pc_user_id', userId);
+    }
+    document.getElementById('userIdInput').value = userId;
+    let selectedFile = null;
+
+    async function autoDiscoverDevices() {
+      try {
+        const res = await fetch('/api/devices');
+        if (res.ok) {
+          const devices = await res.json();
+          const activeDev = devices.find(d => d.online) || devices[0];
+          if (activeDev) {
+            document.getElementById('detectedPcName').innerText = activeDev.name;
+            document.getElementById('detectedPcStatus').innerText = activeDev.online ? '🟢 В сети и готов к управлению' : '🔴 Офлайн';
+            if (!userId) {
+              userId = activeDev.host_id;
+              localStorage.setItem('pc_user_id', userId);
+              document.getElementById('userIdInput').value = userId;
+              document.getElementById('hostName').innerText = activeDev.name;
+              fetchStatus();
+            }
+          } else {
+            document.getElementById('detectedPcName').innerText = 'ПК не обнаружен';
+            document.getElementById('detectedPcStatus').innerText = 'Запустите Agent_GUI на компьютере';
+          }
+        }
+      } catch (e) {}
+    }
+
+    function autoConnectPc() {
+      const name = document.getElementById('detectedPcName').innerText;
+      if (name && name !== 'ПК не обнаружен' && name !== 'Автопоиск ПК...') {
+        userId = name;
+        localStorage.setItem('pc_user_id', userId);
+        document.getElementById('userIdInput').value = userId;
+        showToast('Подключено: ' + userId, '✅');
+        fetchStatus();
+      }
+    }
+
+    function switchTab(viewId, el) {
+      document.querySelectorAll('.view-page').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.getElementById(viewId).classList.add('active');
+      el.classList.add('active');
+      if (viewId === 'viewTasks') loadTasks();
+      if (viewId === 'viewDashboard') fetchStatus();
+      if (viewId === 'viewSettings') autoDiscoverDevices();
+    }
+
+    function setTheme(themeName, el) {
+      document.body.className = '';
+      if (themeName !== 'default') document.body.classList.add('theme-' + themeName);
+      localStorage.setItem('pc_theme', themeName);
+      document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
+      if (el) el.classList.add('active');
+      showToast('🎨 Тема ' + themeName + ' применена!');
+    }
+
+    const savedTheme = localStorage.getItem('pc_theme') || 'default';
+    if (savedTheme !== 'default') {
+      document.body.classList.add('theme-' + savedTheme);
+      document.querySelectorAll('.theme-btn').forEach(b => {
+        if (b.innerText.toLowerCase().includes(savedTheme)) b.classList.add('active');
+      });
+    }
+
+    function showToast(msg, icon = '✨') {
+      const toast = document.getElementById('toast');
+      document.getElementById('toastIcon').innerText = icon;
+      document.getElementById('toastMsg').innerText = msg;
+      toast.classList.add('show');
+      if (navigator.vibrate) navigator.vibrate(20);
+      setTimeout(() => toast.classList.remove('show'), 2600);
+    }
+
+    function saveUserId() {
+      const val = document.getElementById('userIdInput').value.trim();
+      userId = val;
+      localStorage.setItem('pc_user_id', userId);
+      showToast(userId ? 'Компьютер сохранён: ' + userId : 'Включен автопоиск ПК', '✅');
+      fetchStatus();
+    }
+
+    async function sendCmd(action, data = '') {
+      if (navigator.vibrate && action !== 'mouse_move') navigator.vibrate(25);
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: userId, action, data })
+        });
+        const json = await res.json();
+        if (json.status === 'ok') {
+          if (action !== 'mouse_move') showToast(json.message || 'Команда выполнена!');
+        } else {
+          showToast(json.error || 'Ошибка', '⚠️');
+        }
+      } catch (e) {
+        if (action !== 'mouse_move') showToast('Сбой сети', '⚠️');
+      }
+    }
+
+    async function fetchStatus() {
+      const t0 = Date.now();
+      try {
+        const url = userId ? ('/api/status?user_id=' + encodeURIComponent(userId)) : '/api/status';
+        const res = await fetch(url);
+        const ping = Date.now() - t0;
+        document.getElementById('pingValue').innerText = ping + ' мс';
+        if (res.ok) {
+          const data = await res.json();
+          const dot = document.getElementById('statusDot');
+          const hName = document.getElementById('hostName');
+          if (data.online) {
+            dot.classList.add('online');
+            hName.innerText = data.host_id || 'ПК Онлайн';
+            if (!userId) {
+              userId = data.host_id;
+              localStorage.setItem('pc_user_id', userId);
+              document.getElementById('userIdInput').value = userId;
+            }
+          } else {
+            dot.classList.remove('online');
+            hName.innerText = 'Офлайн';
+          }
+          if (data.media_info) {
+            document.getElementById('trackTitle').innerText = data.media_info;
+            document.getElementById('trackStatus').innerText = '▶ Сейчас играет';
+          } else {
+            document.getElementById('trackTitle').innerText = 'Ничего не играет';
+            document.getElementById('trackStatus').innerText = 'Медиаплеер Windows';
+          }
+          if (data.metrics) {
+            const ram = data.metrics.ram_load || 0;
+            const used = data.metrics.ram_used || 0;
+            document.getElementById('ramValue').innerText = ram + '% (' + used + ' GB)';
+            document.getElementById('ramProgress').style.width = ram + '%';
+            if (data.metrics.uptime) {
+              document.getElementById('uptimeText').innerText = '⏱️ ' + data.metrics.uptime;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    setInterval(fetchStatus, 2500);
+    fetchStatus();
+    autoDiscoverDevices();
+
+    async function fetchScreenshot() {
+      showToast('Запрос скриншота...', '📸');
+      await sendCmd('stream');
+      let attempts = 0;
+      const pollScreen = async () => {
+        attempts++;
+        try {
+          const url = (userId ? ('/api/screenshot?user_id=' + encodeURIComponent(userId)) : '/api/screenshot') + '&t=' + Date.now();
+          const res = await fetch(url);
+          if (res.ok) {
+            const blob = await res.blob();
+            document.getElementById('screenImg').src = URL.createObjectURL(blob);
+            document.getElementById('screenCard').style.display = 'block';
+            showToast('Скриншот получен!', '📸');
+            return;
+          }
+        } catch(e) {}
+        if (attempts < 4) {
+          setTimeout(pollScreen, 800);
+        }
+      };
+      setTimeout(pollScreen, 600);
+    }
+
+    function triggerFilePicker() { document.getElementById('airFileInput').click(); }
+
+    function handleFileSelect(e) {
+      if (e.target.files && e.target.files[0]) {
+        selectedFile = e.target.files[0];
+        document.getElementById('airCardTitle').innerText = selectedFile.name;
+        const sizeMb = (selectedFile.size / (1024 * 1024)).toFixed(1);
+        document.getElementById('airCardDesc').innerHTML = 'Размер: <b>' + sizeMb + ' MB</b><br>Смахните карточку <b>вверх</b>!';
+        document.getElementById('airIcon').innerText = '📦';
+        document.getElementById('swipeInd').style.display = 'flex';
+        showToast('Файл готов! Смахните вверх', '🚀');
+      }
+    }
+
+    const airCard = document.getElementById('airCard');
+    let touchStartY = 0, touchDiffY = 0;
+
+    airCard.addEventListener('touchstart', (e) => {
+      if (!selectedFile) return;
+      touchStartY = e.touches[0].clientY;
+      airCard.style.transition = 'none';
+    }, { passive: true });
+
+    airCard.addEventListener('touchmove', (e) => {
+      if (!selectedFile) return;
+      touchDiffY = e.touches[0].clientY - touchStartY;
+      if (touchDiffY < 0) {
+        airCard.style.transform = 'translateY(' + touchDiffY + 'px) scale(' + (1 - Math.abs(touchDiffY)/1000) + ')';
+      }
+    }, { passive: true });
+
+    airCard.addEventListener('touchend', () => {
+      if (!selectedFile) return;
+      airCard.style.transition = 'transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s ease';
+      if (touchDiffY < -80) {
+        airCard.style.transform = 'translateY(-400px) scale(0.6)';
+        airCard.style.opacity = '0';
+        performAirSwipeUpload();
+      } else {
+        airCard.style.transform = 'translateY(0) scale(1)';
+      }
+      touchDiffY = 0;
+    });
+
+    async function performAirSwipeUpload() {
+      showToast('🚀 Отправка на ПК...', '📡');
+      if (navigator.vibrate) navigator.vibrate([40, 80, 40]);
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      fd.append('user_id', userId);
+      try {
+        const res = await fetch('/api/upload_file', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          showToast('🎉 Файл отправлен на ПК в Downloads!', '✅');
+          if (navigator.vibrate) navigator.vibrate(100);
+        } else {
+          showToast(data.error || 'Ошибка отправки', '⚠️');
+        }
+      } catch (e) { showToast('Сбой сети', '⚠️'); }
+      setTimeout(() => {
+        selectedFile = null;
+        document.getElementById('airCardTitle').innerText = 'AirSwipe на ПК';
+        document.getElementById('airCardDesc').innerText = 'Нажмите, чтобы выбрать файл, затем смахните вверх для отправки!';
+        document.getElementById('airIcon').innerText = '🚀';
+        document.getElementById('swipeInd').style.display = 'none';
+        airCard.style.transform = 'translateY(0) scale(1)';
+        airCard.style.opacity = '1';
+      }, 1000);
+    }
+
+    const touchpad = document.getElementById('touchpad');
+    let tpLastX = 0, tpLastY = 0;
+    let accDx = 0, accDy = 0, tpSending = false;
+
+    touchpad.addEventListener('touchstart', (e) => {
+      tpLastX = e.touches[0].clientX;
+      tpLastY = e.touches[0].clientY;
+      accDx = 0; accDy = 0;
+    }, { passive: true });
+
+    touchpad.addEventListener('touchmove', (e) => {
+      const cx = e.touches[0].clientX, cy = e.touches[0].clientY;
+      accDx += Math.round((cx - tpLastX) * 2.2);
+      accDy += Math.round((cy - tpLastY) * 2.2);
+      tpLastX = cx; tpLastY = cy;
+
+      if (!tpSending && (Math.abs(accDx) > 1 || Math.abs(accDy) > 1)) {
+        tpSending = true;
+        const sendDx = accDx; const sendDy = accDy;
+        accDx = 0; accDy = 0;
+        sendCmd('mouse_move', sendDx + ',' + sendDy).finally(() => {
+          setTimeout(() => { tpSending = false; }, 20);
+        });
+      }
+    }, { passive: true });
+
+    function sendTypedText() {
+      const inp = document.getElementById('typeInput');
+      const val = inp.value.trim();
+      if (val) {
+        sendCmd('type_text', val);
+        inp.value = '';
+        showToast('Текст напечатан на ПК!');
+      }
+    }
+
+    async function loadTasks() {
+      const listEl = document.getElementById('tasksList');
+      listEl.innerHTML = '<div style="text-align:center; padding:20px; color:var(--text-muted);">Запрос списка окон...</div>';
+      await sendCmd('get_tasks', 'windowed');
+
+      let attempts = 0;
+      const pollTasks = async () => {
+        attempts++;
+        try {
+          const url = userId ? ('/api/tasks?user_id=' + encodeURIComponent(userId)) : '/api/tasks';
+          const res = await fetch(url);
+          const tasks = await res.json();
+          if (tasks && tasks.length > 0) {
+            listEl.innerHTML = '';
+            tasks.forEach(t => {
+              const div = document.createElement('div');
+              div.className = 'task-item';
+              div.innerHTML = '<div class="task-info"><div class="task-title">' + (t.display || t.name) + '</div><div class="task-exe">' + t.name + '</div></div><button class="btn btn-danger" style="padding:6px 12px; font-size:12px;" onclick="killApp(\'' + t.name + '\')">Закрыть</button>';
+              listEl.appendChild(div);
+            });
+            return;
+          }
+        } catch(e) {}
+        if (attempts < 4) {
+          setTimeout(pollTasks, 700);
+        } else {
+          listEl.innerHTML = '<div style="text-align:center; padding:20px; color:var(--text-muted);">Открытые программы не найдены.</div>';
+        }
+      };
+      setTimeout(pollTasks, 500);
+    }
+
+    async function killApp(procName) {
+      await sendCmd('kill_task', procName);
+      setTimeout(loadTasks, 800);
+    }
+
+    async function loadAudioDevices() {
+      if (!userId) return;
+      await sendCmd('get_audio_devices');
+      let attempts = 0;
+      const pollDevs = async () => {
+        attempts++;
+        try {
+          const res = await fetch('/api/audio_devices?user_id=' + encodeURIComponent(userId));
+          if (res.ok) {
+            const devs = await res.json();
+            const sel = document.getElementById('audioDeviceSelect');
+            if (devs && devs.length > 0) {
+              sel.innerHTML = '';
+              devs.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.id;
+                opt.innerText = (d.is_default ? '✓ ' : '') + d.name;
+                if (d.is_default) opt.selected = true;
+                sel.appendChild(opt);
+              });
+              return;
+            }
+          }
+        } catch(e) {}
+        if (attempts < 3) setTimeout(pollDevs, 800);
+      };
+      setTimeout(pollDevs, 600);
+    }
+
+    async function changeAudioDevice(devId) {
+      if (!devId) return;
+      showToast('Смена аудиоустройства...', '🔊');
+      await sendCmd('set_audio_device', devId);
+      setTimeout(loadAudioDevices, 1200);
+    }
+
+    async function loadAppVolumes() {
+      if (!userId) return;
+      await sendCmd('get_app_volumes');
+      const listEl = document.getElementById('appMixerList');
+      let attempts = 0;
+      const pollVols = async () => {
+        attempts++;
+        try {
+          const res = await fetch('/api/app_volumes?user_id=' + encodeURIComponent(userId));
+          if (res.ok) {
+            const apps = await res.json();
+            if (apps && apps.length > 0) {
+              listEl.innerHTML = '';
+              apps.forEach(a => {
+                const row = document.createElement('div');
+                row.style = 'display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.06);';
+                const muteIcon = a.muted ? '🔇' : '🔊';
+                row.innerHTML = `
+                  <div style="flex:1; overflow:hidden;">
+                    <div style="font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${a.title || a.name}</div>
+                    <div style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+                      <input type="range" min="0" max="100" value="${a.volume}" style="flex:1; accent-color:var(--accent);" onchange="setAppVol(${a.pid}, this.value)">
+                      <span style="font-size:11px; width:34px; color:var(--text-muted); text-align:right;">${a.volume}%</span>
+                    </div>
+                  </div>
+                  <button class="btn btn-circle" style="width:38px; height:38px; font-size:15px; margin-left:8px;" onclick="toggleAppMute(${a.pid}, ${a.muted ? 0 : 1})">${muteIcon}</button>
+                `;
+                listEl.appendChild(row);
+              });
+              return;
+            }
+          }
+        } catch(e) {}
+        if (attempts < 3) {
+          setTimeout(pollVols, 800);
+        } else {
+          listEl.innerHTML = '<div style="text-align:center; padding:12px; color:var(--text-muted); font-size:12px;">Активных приложений со звуком не найдено</div>';
+        }
+      };
+      setTimeout(pollVols, 600);
+    }
+
+    async function setAppVol(pid, vol) {
+      await sendCmd('set_app_volume', pid + '|' + vol);
+      showToast('Громкость: ' + vol + '%');
+    }
+
+    async function toggleAppMute(pid, mute) {
+      await sendCmd('mute_app', pid + '|' + mute);
+      showToast(mute ? 'Звук выключен' : 'Звук включен');
+      setTimeout(loadAppVolumes, 1000);
+    }
+
+    // Первичная подгрузка аудиоустройств
+    setTimeout(loadAudioDevices, 1500);
+  </script>
+</body>
+</html>
