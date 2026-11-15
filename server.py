@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger('gunicorn.error') if 'gunicorn' in os.environ.get('SERVER_SOFTWARE', '') else logging.getLogger(__name__)
 
-# --- Конфигурация из переменных окружения (БЕЗ хардкода токенов) ---
+# --- Конфигурация из переменных окружения ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     logger.error("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения BOT_TOKEN не установлена!")
@@ -21,7 +21,7 @@ RENDER_URL = os.environ.get("RENDER_URL", "").strip().rstrip("/")
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "").strip()
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 
-# Белый список пользователей Telegram (ID через запятую: "123456789,987654321")
+# Белый список пользователей Telegram (если пустой, бот открыт для всех)
 raw_allowed_users = os.environ.get("ALLOWED_USERS", "").strip()
 ALLOWED_USERS = set(filter(None, [u.strip() for u in raw_allowed_users.split(",")])) if raw_allowed_users else set()
 
@@ -34,6 +34,7 @@ app = Flask(__name__)
 hosts_db = {}
 commands_queue = {}
 user_ui_messages = {}
+media_ui_messages = {}
 
 def delete_message_after(chat_id, message_id, delay=3.0):
     """Удаляет временное сервисное сообщение через delay секунд."""
@@ -48,7 +49,9 @@ def delete_message_after(chat_id, message_id, delay=3.0):
 # --- Вспомогательные функции безопасности ---
 
 def is_authorized_user(user_id: str) -> bool:
-    """Бот открыт для всех пользователей: каждый управляет своим ПК по своему Telegram ID."""
+    """Бот открыт для всех: каждый пользователь управляет своим ПК по своему Telegram ID."""
+    if ALLOWED_USERS and str(user_id) not in ALLOWED_USERS:
+        return False
     return True
 
 def sanitize_id(identifier: str) -> str:
@@ -80,65 +83,71 @@ def get_main_keyboard():
     markup.add(types.KeyboardButton("📁 Проводник (Диски)"), types.KeyboardButton("⚙️ Диспетчер задач"))
     markup.add(types.KeyboardButton("🎵 Мультимедиа и Звук"), types.KeyboardButton("🎮 Быстрый запуск"))
     markup.add(types.KeyboardButton("🔒 Блокировка и Окна"), types.KeyboardButton("🔌 Питание ПК"))
-    markup.add(types.KeyboardButton("🖥️ Статус сети"))
+    return markup
+
+def get_media_markup():
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("🔉 Тише (-6%)", callback_data="vol_down"),
+        types.InlineKeyboardButton("🔇 Mute", callback_data="vol_mute"),
+        types.InlineKeyboardButton("🔊 Громче (+6%)", callback_data="vol_up")
+    )
+    markup.row(
+        types.InlineKeyboardButton("⏮️ Предыдущий", callback_data="vol_prev"),
+        types.InlineKeyboardButton("⏯️ Пауза / Плей", callback_data="vol_play_pause"),
+        types.InlineKeyboardButton("⏭️ Следующий", callback_data="vol_next")
+    )
+    markup.row(
+        types.InlineKeyboardButton("🔄 Обновить трек", callback_data="vol_refresh")
+    )
     return markup
 
 # --- Обработчики Telegram бота ---
 
 if bot:
-    @bot.message_handler(commands=['start'])
+    @bot.message_handler(commands=['start', 'help'])
     def send_welcome(message):
         user_id = str(message.chat.id)
-        
         if not is_authorized_user(user_id):
-            logger.warning(f"Неавторизованная попытка доступа от ID: {user_id}")
-            bot.send_message(user_id, "⛔ Доступ запрещен. Бот работает в приватном режиме.")
+            bot.send_message(user_id, "⛔ Доступ к боту ограничен.")
             return
 
-        welcome_text = (
-            f"👋 *Добро пожаловать в центр управления ПК!*\n\n"
-            f"🔑 Твой личный Telegram ID: `{user_id}`\n"
-            f"*(нажми на число выше, чтобы скопировать его в буфер)*\n\n"
-            f"🚀 *Инструкция подключения:*\n"
-            f"1. Открой приложение `Agent.py` на компьютере.\n"
-            f"2. Вставь скопированный ID и нажми **«Запустить Агент»**.\n"
-            f"3. Все функции станут доступны мгновенно в этом чате!"
-        )
+        target_host = get_target_host(user_id)
+        status_text = f"🟢 ПК онлайн: `{target_host}`" if target_host else "🔴 Ваш ПК сейчас не подключён."
         
-        bot.send_message(user_id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        help_text = (
+            f"👋 *Добро пожаловать в PC Remote Ecosystem!*\n\n"
+            f"🆔 *Ваш Telegram ID:* `{user_id}`\n"
+            f"🖥 *Статус:* {status_text}\n\n"
+            f"💡 Введите этот ID в окне приложения агента на вашем компьютере для мгновенной связи."
+        )
+        bot.send_message(user_id, help_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+    @bot.message_handler(commands=['get_agent'])
+    def send_agent_file(message):
+        user_id = str(message.chat.id)
+        if not is_authorized_user(user_id):
+            return
 
         if os.path.exists(EXE_FILE):
-            try:
-                with open(EXE_FILE, "rb") as exe_data:
-                    bot.send_document(user_id, exe_data, caption="💻 Клиентский агент для твоего ПК")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке agent.exe: {e}")
+            with open(EXE_FILE, "rb") as f:
+                bot.send_document(
+                    user_id, f, 
+                    caption="⚡ *Клиент PC Remote Agent*\nЗапустите на компьютере и введите ваш Telegram ID.",
+                    parse_mode="Markdown"
+                )
+        else:
+            bot.send_message(user_id, "ℹ️ Файл агента собирается на сервере. Скачайте его через релизы GitHub.")
 
-    @bot.message_handler(func=lambda message: message.text in ["🖥️ Статус сети", "🖥️ Статус ПК"])
-    def bot_status(message):
+    @bot.message_handler(func=lambda message: message.text in ["📊 Мониторинг ПК", "📸 Скриншот экрана", "📸 Сделать скриншот", "📁 Проводник (Диски)", "⚙️ Диспетчер задач"])
+    def handle_main_commands(message):
         user_id = str(message.chat.id)
         if not is_authorized_user(user_id):
             return
-
-        text = "🖥️ *Подключенные устройства:*\n\n"
-        found = False
-        now = time.time()
-        for hid, info in list(hosts_db.items()):
-            if info.get("user_id") == user_id:
-                diff = int(now - info.get("last_seen", 0))
-                is_online = diff < 25
-                status_icon = f"Онлайн ✅ ({diff}с назад)" if is_online else "Офлайн ❌"
-                text += f"● `{hid}` — {status_icon}\n"
-                found = True
-        bot.send_message(user_id, text if found else "❌ Нет активных подключений. Запустите агент на ПК.", parse_mode="Markdown")
-
-    @bot.message_handler(func=lambda message: message.text in ["📊 Мониторинг ПК", "📸 Скриншот экрана", "📸 Сделать скриншот", "📁 Проводник (Диски)", "⚙️ Диспетчер задач"])
-    def handle_direct_commands(message):
-        user_id = str(message.chat.id)
 
         target_host = get_target_host(user_id)
         if not target_host:
-            bot.send_message(user_id, "❌ Твой ПК не подключен или находится офлайн. Запустите agent.exe на компьютере.")
+            bot.send_message(user_id, "❌ Твой ПК не подключен или находится офлайн. Запустите агент на компьютере.")
             return
 
         if message.text == "⚙️ Диспетчер задач":
@@ -167,23 +176,19 @@ if bot:
 
         target_host = get_target_host(user_id)
         if not target_host:
-            bot.send_message(user_id, "❌ Твой ПК не подключен или находится офлайн. Запустите agent.exe на компьютере.")
+            bot.send_message(user_id, "❌ Твой ПК не подключен или находится офлайн. Запустите агент на компьютере.")
             return
 
         markup = types.InlineKeyboardMarkup()
 
         if message.text == "🎵 Мультимедиа и Звук":
-            markup.row(
-                types.InlineKeyboardButton("🔉 Тише (-6%)", callback_data="vol_down"),
-                types.InlineKeyboardButton("🔇 Mute", callback_data="vol_mute"),
-                types.InlineKeyboardButton("🔊 Громче (+6%)", callback_data="vol_up")
+            cur_track = hosts_db.get(target_host, {}).get("media_info") or "Трек не обнаружен или плеер на паузе"
+            text = (
+                f"🎵 *Управление звуком и медиаплеером:*\n\n"
+                f"🎧 *Сейчас играет:*\n▶️ `{cur_track}`"
             )
-            markup.row(
-                types.InlineKeyboardButton("⏮️ Предыдущий", callback_data="vol_prev"),
-                types.InlineKeyboardButton("⏯️ Пауза / Плей", callback_data="vol_play_pause"),
-                types.InlineKeyboardButton("⏭️ Следующий", callback_data="vol_next")
-            )
-            bot.send_message(user_id, "🎵 *Управление звуком и медиаплеером:*", reply_markup=markup, parse_mode="Markdown")
+            msg = bot.send_message(user_id, text, reply_markup=get_media_markup(), parse_mode="Markdown")
+            media_ui_messages[user_id] = msg.message_id
 
         elif message.text in ["🎮 Быстрый запуск", "🎮 Запуск программ"]:
             markup.row(
@@ -232,7 +237,6 @@ if bot:
             return
 
         data = call.data
-        # Сохраняем ID сообщения только для проводника и диспетчера задач (где обновляется внутреннее содержимое меню)
         if data.startswith("tasks_") or data.startswith("explore_") or data.startswith("kill_task_"):
             user_ui_messages[user_id] = call.message.message_id
 
@@ -240,7 +244,7 @@ if bot:
         if data.startswith("tasks_") and data != "tasks_menu_back":
             task_type = data.replace("tasks_", "")
             add_command(target_host, "get_tasks", task_type)
-            type_name = "оконных программ" if task_type == "windowed" else "фоновых служб"
+            type_name = "открытых окон" if task_type == "windowed" else "фоновых служб"
             bot.edit_message_text(f"⏳ Сбор данных {type_name}...", user_id, call.message.message_id)
 
         elif data == "tasks_menu_back":
@@ -282,9 +286,15 @@ if bot:
                 "mute": "🔇 Звук переключен",
                 "play_pause": "⏯️ Пауза / Воспроизведение",
                 "next": "⏭️ Следующий трек",
-                "prev": "⏮️ Предыдущий трек"
+                "prev": "⏮️ Предыдущий трек",
+                "refresh": "🔄 Запрос инфо о треке..."
             }
-            bot.answer_callback_query(call.id, vol_labels.get(vol_act, f"Медиа: {vol_act}"))
+            media_ui_messages[user_id] = call.message.message_id
+            track = hosts_db.get(target_host, {}).get("media_info")
+            if track and vol_act in ["next", "prev", "play_pause", "refresh"]:
+                bot.answer_callback_query(call.id, f"▶️ {track[:45]}")
+            else:
+                bot.answer_callback_query(call.id, vol_labels.get(vol_act, f"Медиа: {vol_act}"))
 
         # 4. Запуск программ
         elif data.startswith("app_"):
@@ -298,7 +308,7 @@ if bot:
             bot.answer_callback_query(call.id, "🔒 Блокировка экрана...")
         elif data == "act_minimize_all":
             add_command(target_host, "quick_action", "minimize_all")
-            bot.answer_callback_query(call.id, "🪟 Сворачивание окон...")
+            bot.answer_callback_query(call.id, "🪟 Окна свернуты.")
         elif data == "act_clip_get":
             add_command(target_host, "quick_action", "clipboard_get")
             bot.answer_callback_query(call.id, "📋 Чтение буфера обмена...")
@@ -359,8 +369,33 @@ def poll():
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
         return jsonify({"error": "User not allowed"}), 403
 
-    hosts_db[host_id] = {"user_id": user_id, "status": "online", "last_seen": time.time()}
+    prev_info = hosts_db.get(host_id, {})
+    hosts_db[host_id] = {
+        "user_id": user_id, 
+        "status": "online", 
+        "last_seen": time.time(),
+        "media_info": data.get("media_info") or prev_info.get("media_info", "")
+    }
     ui_msg_id = user_ui_messages.get(user_id)
+
+    # Обновление активного сообщения мультимедиа, если трек изменился
+    cur_track = data.get("media_info")
+    if cur_track:
+        old_track = prev_info.get("media_info", "")
+        media_msg_id = media_ui_messages.get(user_id)
+        if media_msg_id and bot and (cur_track != old_track or data.get("event_type") == "media_refresh"):
+            try:
+                text = (
+                    f"🎵 *Управление звуком и медиаплеером:*\n\n"
+                    f"🎧 *Сейчас играет:*\n▶️ `{cur_track}`"
+                )
+                bot.edit_message_text(
+                    text, user_id, media_msg_id, 
+                    reply_markup=get_media_markup(), 
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
 
     # 1. Отчет о мониторинге системы
     if data.get("event_type") == "sysinfo_ready" and bot:
@@ -377,7 +412,7 @@ def poll():
             f"📊 *Системный мониторинг: `{host_id}`*\n\n"
             f"⏱️ *Время работы ПК:* `{uptime}`\n"
             f"🧠 *Оперативная память:* `{ram_load}%` ({ram_used} GB / {ram_total} GB)\n"
-            f"💽 *Диски ПК:*\n{drives_text}\n"
+            f"💾 *Диски ПК:*\n{drives_text}\n"
         )
         if ui_msg_id:
             try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
@@ -385,17 +420,21 @@ def poll():
         else:
             bot.send_message(user_id, text, parse_mode="Markdown")
 
-    # 2. Диспетчер задач
+    # 2. Диспетчер задач (Открытые приложения / фоновые службы)
     elif data.get("event_type") == "tasks_ready" and bot:
         markup = types.InlineKeyboardMarkup(row_width=1)
         tasks = data.get("items", [])
         
-        text = "⚙️ *Список активных процессов:*\nНажмите кнопку для завершения:\n\n"
-        for task in tasks[:15]:
-            display_name = task.get("display", task.get("name", ""))[:40]
-            proc_name = task.get("name", "")[:35]
-            text += f"• `{display_name}`\n"
-            markup.add(types.InlineKeyboardButton(f"❌ Завершить {proc_name}", callback_data=f"kill_task_{proc_name}"))
+        if not tasks:
+            text = "🖥 *Открытые приложения не найдены.*\nВсе окна свернуты или закрыты."
+        else:
+            text = "🖥 *Открытые приложения пользователя:*\nНажмите кнопку для закрытия нужного окна:\n\n"
+            for task in tasks[:15]:
+                display_name = task.get("display", task.get("name", ""))[:45]
+                proc_name = task.get("name", "")[:35]
+                text += f"• `{display_name}`\n"
+                clean_btn = f"❌ Закрыть {display_name[:24]}"
+                markup.add(types.InlineKeyboardButton(clean_btn, callback_data=f"kill_task_{proc_name}"))
             
         markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="tasks_menu_back"))
 
@@ -414,14 +453,15 @@ def poll():
         if not current_dir:
             text = "📁 *Проводник:* Выберите диск компьютера:"
             for item in items[:8]:
-                markup.add(types.InlineKeyboardButton(f"💽 {item['name']}", callback_data=f"explore_drive_{item['name']}"))
+                markup.add(types.InlineKeyboardButton(f"💾 {item['name']}", callback_data=f"explore_drive_{item['name']}"))
         else:
             text = f"📁 *Папка:* `{current_dir}`"
             markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="explore_back_"))
             for item in items[:12]:
                 if item.get("is_dir"):
-                    folder_name = item['name'][:30]
-                    markup.add(types.InlineKeyboardButton(f"📁 {folder_name}", callback_data=f"explore_cd_{folder_name}"))
+                    markup.add(types.InlineKeyboardButton(f"📁 {item['name'][:30]}", callback_data=f"explore_cd_{item['name'][:30]}"))
+                else:
+                    markup.add(types.InlineKeyboardButton(f"📄 {item['name'][:30]}", callback_data="none"))
                     
         if ui_msg_id:
             try: bot.edit_message_text(text, user_id, ui_msg_id, reply_markup=markup, parse_mode="Markdown")
@@ -429,28 +469,14 @@ def poll():
         else:
             bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
 
-    # 4. Текстовые отчеты
+    # 4. Текстовый отчет
     elif data.get("report") and bot:
-        safe_report = str(data['report'])[:350]
-        # Для звука, медиа, запуска программ и быстрых действий отправляем статус отдельным сообщением и удаляем через 3 секунды
-        is_transient = any(k in safe_report.lower() for k in [
-            "громкость", "звук", "медиа", "трек", "запущено", "запущен", "заблокирован", "свернуты", "буфер"
-        ])
-        
-        if is_transient:
-            try:
-                temp_msg = bot.send_message(user_id, f"💬 `{host_id}`:\n{safe_report}", parse_mode="Markdown")
-                delete_message_after(user_id, temp_msg.message_id, delay=3.0)
-            except Exception as e:
-                logger.error(f"Ошибка отправки временного отчета: {e}")
-        else:
-            text = f"💬 `{host_id}`:\n{safe_report}"
-            if ui_msg_id:
-                try: bot.edit_message_text(text, user_id, ui_msg_id, parse_mode="Markdown")
-                except: bot.send_message(user_id, text, parse_mode="Markdown")
-            else:
-                bot.send_message(user_id, text, parse_mode="Markdown")
+        rep = data.get("report")
+        if not rep.startswith("Медиа:"):
+            msg = bot.send_message(user_id, f"💬 {rep}")
+            delete_message_after(user_id, msg.message_id, delay=3.0)
 
+    # Выдача команд
     cmds = commands_queue.get(host_id, [])
     commands_queue[host_id] = []
     return jsonify({"status": "ok", "commands": cmds}), 200
@@ -474,7 +500,7 @@ def upload_screenshot():
     if request.data and bot:
         image_stream = io.BytesIO(request.data)
         image_stream.name = f"screenshot_{host_id}.jpg"
-        bot.send_photo(user_id, image_stream, caption=f"📸 Скриншот: `{host_id}`", parse_mode="Markdown")
+        bot.send_photo(user_id, image_stream, caption=f"📸 Скриншот экрана: `{host_id}`", parse_mode="Markdown")
         return "OK", 200
     return "Error", 400
 
